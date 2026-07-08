@@ -1,13 +1,17 @@
+"""Iota Welcome System — MongoDB-backed, with an interactive settings panel"""
 import random
-from telegram import Update, ChatPermissions
+from telegram import Update, ChatPermissions, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import ContextTypes
-from utils.db import get_conn, ensure_user, get_user
+from utils.mongo_db import ensure_user, get_user, get_welcome_settings, set_welcome_settings
 from utils.helpers import mention, ts
+from utils.gif_provider import get_gif_for_mood
+from utils.safe_html import safe_html
 
-# ── Welcome GIF URLs (Telegram file_id or web URLs fallback) ─────────────────
-WELCOME_GIFS = [
-    "https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExNmRiNDFmNGE2ZDM3ZjVlNzQ3NmE5M2QyZDVlNWY0ZTQ5OWFiNDU2ZCZlcD12MV9pbnRlcm5hbGdfZ2lmX2J5X2lkJmN0PWc/3ohzdIuqJoo8QdKlnW/giphy.gif",
-]
+# NOTE: the old static WELCOME_GIFS backup list (2 hardcoded giphy.com
+# media IDs) has been removed — both links had rotted (403 on request).
+# Welcome GIFs now come exclusively from the live GIPHY search in
+# utils/gif_provider.py. If that's ever unreachable, new_member_handler
+# below just sends the welcome text without a GIF — no broken image.
 
 WELCOME_TEXTS = [
     "💗 welcome {name}",
@@ -19,39 +23,6 @@ WELCOME_TEXTS = [
 
 WELCOME_STICKER_IDS: list = []  # Add Telegram sticker file_ids here
 
-# ── DB helpers ────────────────────────────────────────────────────────────────
-
-def get_welcome_settings(chat_id: int) -> dict:
-    c = get_conn()
-    row = c.execute("SELECT * FROM welcome_settings WHERE chat_id=?", (chat_id,)).fetchone()
-    if row:
-        return dict(row)
-    return {"chat_id": chat_id, "enabled": 1, "custom_msg": "", "send_gif": 1, "send_sticker": 0}
-
-def set_welcome_settings(chat_id, enabled=None, custom_msg=None, send_gif=None, send_sticker=None):
-    c = get_conn()
-    cur = get_welcome_settings(chat_id)
-    e   = enabled     if enabled     is not None else cur["enabled"]
-    cm  = custom_msg  if custom_msg  is not None else cur["custom_msg"]
-    sg  = send_gif    if send_gif    is not None else cur["send_gif"]
-    ss  = send_sticker if send_sticker is not None else cur["send_sticker"]
-    c.execute("""INSERT OR REPLACE INTO welcome_settings
-                 (chat_id,enabled,custom_msg,send_gif,send_sticker)
-                 VALUES(?,?,?,?,?)""", (chat_id, e, cm, sg, ss))
-    c.commit()
-
-def _ensure_welcome_table():
-    c = get_conn()
-    c.execute("""CREATE TABLE IF NOT EXISTS welcome_settings (
-        chat_id     INTEGER PRIMARY KEY,
-        enabled     INTEGER DEFAULT 1,
-        custom_msg  TEXT    DEFAULT '',
-        send_gif    INTEGER DEFAULT 1,
-        send_sticker INTEGER DEFAULT 0
-    )""")
-    c.commit()
-
-_ensure_welcome_table()
 
 # ── New member handler ────────────────────────────────────────────────────────
 
@@ -61,43 +32,51 @@ async def new_member_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not msg or not msg.new_chat_members:
         return
 
-    ws = get_welcome_settings(chat.id)
-    if not ws["enabled"]:
+    ws = await get_welcome_settings(chat.id)
+    if not ws.get("enabled", True):
         return
 
     for member in msg.new_chat_members:
         if member.is_bot:
             continue
 
-        ensure_user(member.id, member.username or "", member.full_name)
-        name_str = mention(member)
-        group_str = f"<b>{chat.title}</b>"
+        await ensure_user(member.id, member.username or "", member.full_name)
+        name_str  = mention(member)
+        group_str = f"<b>{safe_html(chat.title)}</b>"
 
-        # Build welcome text
-        if ws["custom_msg"]:
-            text = ws["custom_msg"].replace("{name}", name_str).replace("{group}", group_str)
+        custom_msg = ws.get("custom_msg", "")
+        if custom_msg:
+            # Escape the admin's custom text first (in case it has a
+            # stray "<" or ">" that isn't meant as HTML — same class of
+            # bug that broke /panel — then substitute the safe {name}/
+            # {group} placeholders back in, which are already HTML-safe.
+            text = safe_html(custom_msg).replace("{name}", name_str).replace("{group}", group_str)
         else:
             tmpl = random.choice(WELCOME_TEXTS)
             text = tmpl.format(name=name_str, group=group_str)
 
         try:
-            # Send GIF first if enabled
-            if ws["send_gif"]:
+            gif_url = None
+            if ws.get("send_gif", True):
+                try:
+                    gif_url = await get_gif_for_mood("welcome")
+                except Exception:
+                    pass
+
+            if gif_url:
                 await context.bot.send_animation(
                     chat.id,
-                    animation="https://media.giphy.com/media/3ohzdIuqJoo8QdKlnW/giphy.gif",
+                    animation=gif_url,
                     caption=text,
                     parse_mode="HTML"
                 )
             else:
                 await msg.reply_html(text)
 
-            # Send sticker if we have one
-            if ws["send_sticker"] and WELCOME_STICKER_IDS:
+            if ws.get("send_sticker") and WELCOME_STICKER_IDS:
                 await context.bot.send_sticker(chat.id, random.choice(WELCOME_STICKER_IDS))
 
         except Exception:
-            # Fallback plain text
             try:
                 await context.bot.send_message(chat.id, text, parse_mode="HTML")
             except Exception:
@@ -117,14 +96,44 @@ async def left_member_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     try:
         await context.bot.send_message(
             chat.id,
-            f"👋 {mention(member)} has left <b>{chat.title}</b>. Goodbye!",
+            f"👋 {mention(member)} has left <b>{safe_html(chat.title)}</b>. Goodbye!",
             parse_mode="HTML"
         )
     except Exception:
         pass
 
 
-# ── /setwelcome ───────────────────────────────────────────────────────────────
+# ── /setwelcome — interactive panel (with text shortcuts still supported) ──
+
+def _panel_kb(chat_id: int, ws: dict) -> InlineKeyboardMarkup:
+    enabled = ws.get("enabled", True)
+    gif_on  = ws.get("send_gif", True)
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            "🟢 Enabled" if enabled else "🔴 Disabled",
+            callback_data=f"wset_toggle_{chat_id}"
+        )],
+        [InlineKeyboardButton(
+            "🎬 GIF: On" if gif_on else "🎬 GIF: Off",
+            callback_data=f"wset_gif_{chat_id}"
+        )],
+        [InlineKeyboardButton("✏️ Set Custom Message", callback_data=f"wset_msg_{chat_id}"),
+         InlineKeyboardButton("♻️ Reset", callback_data=f"wset_reset_{chat_id}")],
+        [InlineKeyboardButton("👁️ Preview", callback_data=f"wset_preview_{chat_id}")],
+    ])
+
+
+def _panel_text(chat_title: str, ws: dict) -> str:
+    custom = ws.get("custom_msg", "")
+    preview = safe_html(custom) if custom else "<i>(using default random messages)</i>"
+    return (
+        f"📝 <b>Welcome Settings — {safe_html(chat_title)}</b>\n\n"
+        f"Status: <b>{'Enabled ✅' if ws.get('enabled', True) else 'Disabled ❌'}</b>\n"
+        f"GIF: <b>{'On' if ws.get('send_gif', True) else 'Off'}</b>\n\n"
+        f"Current message:\n{preview}\n\n"
+        f"💡 Tip: use {{name}} and {{group}} as placeholders in a custom message."
+    )
+
 
 async def setwelcome_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     from utils.helpers import is_admin
@@ -135,37 +144,88 @@ async def setwelcome_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_html("❌ Admins only!"); return
 
     args = context.args
+
+    # No args → show the interactive panel (preferred, professional UX).
     if not args:
+        ws = await get_welcome_settings(chat.id)
         await update.message.reply_html(
-            "📝 <b>Welcome Settings</b>\n\n"
-            "Usage:\n"
-            "/setwelcome on — Enable welcome\n"
-            "/setwelcome off — Disable welcome\n"
-            "/setwelcome gif on/off — Toggle GIF\n"
-            "/setwelcome msg <text> — Custom message\n"
-            "  Use {name} for user, {group} for group name\n"
-            "/setwelcome reset — Reset to default"
+            _panel_text(chat.title, ws), reply_markup=_panel_kb(chat.id, ws)
         ); return
 
+    # Text shortcuts remain available for power users / scripting.
     cmd = args[0].lower()
     if cmd == "on":
-        set_welcome_settings(chat.id, enabled=1)
+        await set_welcome_settings(chat.id, enabled=True)
         await update.message.reply_html("✅ Welcome messages <b>enabled</b>!")
     elif cmd == "off":
-        set_welcome_settings(chat.id, enabled=0)
+        await set_welcome_settings(chat.id, enabled=False)
         await update.message.reply_html("❌ Welcome messages <b>disabled</b>!")
     elif cmd == "gif":
-        val = args[1].lower() if len(args)>1 else "on"
-        set_welcome_settings(chat.id, send_gif=1 if val=="on" else 0)
-        await update.message.reply_html(f"🎬 Welcome GIF: <b>{'on' if val=='on' else 'off'}</b>")
+        val = args[1].lower() if len(args) > 1 else "on"
+        await set_welcome_settings(chat.id, send_gif=(val == "on"))
+        await update.message.reply_html(f"🎬 Welcome GIF: <b>{safe_html(val)}</b>")
     elif cmd == "msg":
         custom = " ".join(args[1:])
         if not custom:
             await update.message.reply_html("❌ Provide a message!"); return
-        set_welcome_settings(chat.id, custom_msg=custom)
-        await update.message.reply_html(f"✅ Welcome message set!\nPreview:\n{custom}")
+        await set_welcome_settings(chat.id, custom_msg=custom)
+        await update.message.reply_html(f"✅ Welcome message set!\nPreview:\n{safe_html(custom)}")
     elif cmd == "reset":
-        set_welcome_settings(chat.id, custom_msg="", send_gif=1)
+        await set_welcome_settings(chat.id, custom_msg="", send_gif=True)
         await update.message.reply_html("✅ Welcome reset to default!")
     else:
         await update.message.reply_html("❌ Unknown option. Use /setwelcome for help.")
+
+
+# ── Button panel callback ───────────────────────────────────────────────────
+
+async def welcome_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    from utils.helpers import is_admin
+    q = update.callback_query
+    parts = q.data.split("_")
+    action = parts[1]
+    chat_id = int(parts[2])
+
+    if not await is_admin(update, context, q.from_user.id):
+        await q.answer("Admins only!", show_alert=True); return
+
+    ws = await get_welcome_settings(chat_id)
+
+    if action == "toggle":
+        await set_welcome_settings(chat_id, enabled=not ws.get("enabled", True))
+    elif action == "gif":
+        await set_welcome_settings(chat_id, send_gif=not ws.get("send_gif", True))
+    elif action == "reset":
+        await set_welcome_settings(chat_id, custom_msg="", send_gif=True, enabled=True)
+        await q.answer("Reset to default!")
+    elif action == "msg":
+        await q.answer(
+            "To set a custom message, use:\n/setwelcome msg <your text>\n\n"
+            "Use {name} and {group} as placeholders.",
+            show_alert=True
+        )
+        return
+    elif action == "preview":
+        member = q.from_user
+        ws2 = await get_welcome_settings(chat_id)
+        custom = ws2.get("custom_msg", "")
+        name_str = mention(member)
+        group_str = f"<b>{safe_html(q.message.chat.title or 'this group')}</b>"
+        if custom:
+            text = safe_html(custom).replace("{name}", name_str).replace("{group}", group_str)
+        else:
+            text = random.choice(WELCOME_TEXTS).format(name=name_str, group=group_str)
+        await q.answer()
+        await q.message.reply_html(f"👁️ <b>Preview:</b>\n\n{text}")
+        return
+
+    await q.answer()
+    ws = await get_welcome_settings(chat_id)
+    chat_title = q.message.chat.title or "this group"
+    try:
+        await q.edit_message_text(
+            _panel_text(chat_title, ws), parse_mode="HTML",
+            reply_markup=_panel_kb(chat_id, ws)
+        )
+    except Exception:
+        pass  # message unchanged (e.g. double-tap) — not an error

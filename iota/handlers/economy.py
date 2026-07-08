@@ -1,42 +1,145 @@
-"""Iota Economy — Baka-style fonts, free 1d protect, 600 coin revive, auto daily"""
+"""Iota Economy — Iota-style fonts, free 1d protect, 600 coin revive, auto daily"""
+import logging
 import random, asyncio, time
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import ContextTypes
 from utils.mongo_db import *
 from utils.helpers import *
+from utils.safe_html import safe_html
 from utils.fonts import sc, bold_sc
+from utils.system_gate import economy_gate
 from config import *
 
+logger = logging.getLogger(__name__)
+
 # ── /daily ────────────────────────────────────────────────────────────────────
+@economy_gate
 async def daily_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Manual daily claim. Exactly 24h cooldown for everyone (86400 seconds
+    — a full day, not a moment less).
+
+    Free users: this is the ONLY way to claim — must run /daily every 24h.
+    Premium users: /daily still works as a manual claim (handy if you're
+    around right when it resets), but they'll ALSO get it automatically
+    credited by auto_daily_job() if they don't claim manually — see that
+    function below for the premium-only auto-claim logic.
+    """
     u = update.effective_user
     await ensure_user(u.id, u.username or "", u.full_name)
     d = await get_user(u.id)
     if d.get("is_banned"):
         await update.message.reply_html(f"🚫 {sc('You are banned!')}"); return
-    now = ts(); cd = 86400
+    now = ts(); cd = 86400  # exactly 24 hours, no more, no less
     if now - d["last_daily"] < cd:
         rem = cd-(now-d["last_daily"]); h,m = divmod(rem//60,60)
         kb = InlineKeyboardMarkup([[
             InlineKeyboardButton("⏰ Remind Me", callback_data=f"remind_daily_{u.id}")
         ]])
+        extra = ""
+        if d.get("is_premium"):
+            extra = f"\n💓 {sc('Premium perk: this will auto-claim for you if you forget!')}"
         await update.message.reply_html(
             f"⏳ {mention(u)}, {sc('Already Claimed!')}\n"
-            f"{sc('Come Back In')} <b>{h}h {m}m</b>",
+            f"{sc('Come Back In')} <b>{h}h {m}m</b>{extra}",
             reply_markup=kb
         ); return
     reward  = DAILY_PREMIUM if d.get("is_premium") else DAILY_NORMAL
     xp_gain = 100 if d.get("is_premium") else 50
-    await update_user(u.id, balance=d["balance"]+reward, last_daily=now,
+
+    # 🔴 FIX: daily_streak was only ever READ (by /streak), never WRITTEN
+    # anywhere in the codebase — every user's streak was permanently
+    # stuck at 0 no matter how many days in a row they claimed. Now
+    # properly maintained here: continues if claimed within the 48h
+    # grace window /streak already expects, resets to 1 if that window
+    # was missed, and tracks the best streak ever reached.
+    prev_streak = d.get("daily_streak", 0)
+    hours_since_last = (now - d["last_daily"]) / 3600 if d["last_daily"] > 0 else 999
+    new_streak = prev_streak + 1 if hours_since_last < 48 else 1
+    max_streak = max(d.get("max_streak", 0), new_streak)
+
+    # Milestone bonus every 7-day streak — rewards consistency without
+    # needing a whole new command/system; builds on the existing streak
+    # tracking (which was previously dead code — see fix note above).
+    streak_bonus = 0
+    milestone_note = ""
+    if new_streak > 0 and new_streak % 7 == 0:
+        streak_bonus = DAILY_NORMAL * 2 if not d.get("is_premium") else DAILY_PREMIUM * 2
+        milestone_note = f"\n🎉 <b>{new_streak}-day streak bonus!</b> +{fmt(streak_bonus)}"
+
+    total_reward = reward + streak_bonus
+    await update_user(u.id, balance=d["balance"]+total_reward, last_daily=now,
                       xp=d["xp"]+xp_gain, daily_kills=0, daily_robs=0,
-                      last_kill_reset=now, last_rob_reset=now)
+                      last_kill_reset=now, last_rob_reset=now,
+                      daily_streak=new_streak, max_streak=max_streak)
     lv = xp_level(d["xp"]+xp_gain)
+    streak_fire = "🔥" if new_streak >= 3 else "📅"
     await update.message.reply_html(
         f"✅ {mention(u)} {sc('Claimed Daily Reward!')}\n"
         f"💰 +{fmt(reward)}  |  ⚡ +{xp_gain} XP\n"
+        f"{streak_fire} {sc('Streak')}: <b>{new_streak} day{'s' if new_streak != 1 else ''}</b>"
+        f"{milestone_note}\n"
         f"🎖️ {sc('Level')}: <b>{lv}</b>  |  🏅 {rank_title(lv)}\n"
-        f"💼 {sc('Balance')}: <b>{fmt(d['balance']+reward)}</b>"
+        f"💼 {sc('Balance')}: <b>{fmt(d['balance']+total_reward)}</b>"
     )
+
+# ── /weekly ────────────────────────────────────────────────────────────────────
+@economy_gate
+async def weekly_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Claim a bigger weekly bonus — 7 day cooldown."""
+    u = update.effective_user
+    await ensure_user(u.id, u.username or "", u.full_name)
+    d = await get_user(u.id)
+    if d.get("is_banned"):
+        await update.message.reply_html(f"🚫 {sc('You are banned!')}"); return
+    now = ts(); cd = 604800  # 7 days
+    if now - d.get("last_weekly", 0) < cd:
+        rem = cd - (now - d.get("last_weekly", 0)); h, m = divmod(rem // 60, 60); dd = rem // 86400
+        await update.message.reply_html(
+            f"⏳ {mention(u)}, {sc('Weekly Already Claimed!')}\n"
+            f"{sc('Come Back In')} <b>{dd}d {h}h {m}m</b>"
+        ); return
+    reward = WEEKLY_PREMIUM if d.get("is_premium") else WEEKLY_NORMAL
+    xp_gain = 300 if d.get("is_premium") else 150
+    await update_user(u.id, balance=d["balance"] + reward, last_weekly=now,
+                      xp=d["xp"] + xp_gain)
+    lv = xp_level(d["xp"] + xp_gain)
+    await update.message.reply_html(
+        f"📅 {mention(u)} {sc('Claimed Weekly Reward!')}\n"
+        f"💰 +{fmt(reward)}  |  ⚡ +{xp_gain} XP\n"
+        f"🎖️ {sc('Level')}: <b>{lv}</b>  |  🏅 {rank_title(lv)}\n"
+        f"💼 {sc('Balance')}: <b>{fmt(d['balance'] + reward)}</b>"
+    )
+
+
+# ── /monthly ──────────────────────────────────────────────────────────────────
+@economy_gate
+async def monthly_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Claim the biggest monthly bonus — 30 day cooldown."""
+    u = update.effective_user
+    await ensure_user(u.id, u.username or "", u.full_name)
+    d = await get_user(u.id)
+    if d.get("is_banned"):
+        await update.message.reply_html(f"🚫 {sc('You are banned!')}"); return
+    now = ts(); cd = 2592000  # 30 days
+    if now - d.get("last_monthly", 0) < cd:
+        rem = cd - (now - d.get("last_monthly", 0)); dd = rem // 86400; h = (rem % 86400) // 3600
+        await update.message.reply_html(
+            f"⏳ {mention(u)}, {sc('Monthly Already Claimed!')}\n"
+            f"{sc('Come Back In')} <b>{dd}d {h}h</b>"
+        ); return
+    reward = MONTHLY_PREMIUM if d.get("is_premium") else MONTHLY_NORMAL
+    xp_gain = 1000 if d.get("is_premium") else 500
+    await update_user(u.id, balance=d["balance"] + reward, last_monthly=now,
+                      xp=d["xp"] + xp_gain)
+    lv = xp_level(d["xp"] + xp_gain)
+    await update.message.reply_html(
+        f"🗓️ {mention(u)} {sc('Claimed Monthly Reward!')}\n"
+        f"💰 +{fmt(reward)}  |  ⚡ +{xp_gain} XP\n"
+        f"🎖️ {sc('Level')}: <b>{lv}</b>  |  🏅 {rank_title(lv)}\n"
+        f"💼 {sc('Balance')}: <b>{fmt(d['balance'] + reward)}</b>"
+    )
+
 
 async def daily_remind_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; u = q.from_user; await q.answer()
@@ -56,44 +159,86 @@ async def _remind_daily(bot, uid, secs):
             parse_mode="HTML")
     except Exception: pass
 
-# ── AUTO DAILY JOB (background) ───────────────────────────────────────────────
+# ── AUTO DAILY JOB (background, PREMIUM ONLY) ─────────────────────────────────
 async def auto_daily_job(bot):
-    """Every hour, check users whose 24h is up — give them daily automatically."""
+    """
+    Every 10 minutes, auto-credit the daily reward for PREMIUM users whose
+    24-hour cooldown has fully elapsed — this is the premium perk: they
+    never have to remember to run /daily.
+
+    Free users are deliberately EXCLUDED here (is_premium: True filter
+    below) — for them, /daily must always be claimed manually, exactly
+    as intended.
+
+    🔴 TWO BUGS FIXED FROM THE PREVIOUS VERSION:
+    1. The old query used a Python dict with the key "last_daily" TWICE:
+           {"last_daily": {"$lt": ...}, "last_daily": {"$gt": 0}}
+       In Python, a duplicate dict key silently keeps only the LAST
+       value — so the "$lt" (has 24h actually passed?) condition was
+       being thrown away entirely before the query even reached MongoDB.
+       This meant the job would try to auto-pay ANY user who had ever
+       claimed daily once, on every single run, regardless of whether a
+       day had actually passed — a major source of "why is my daily
+       timing all over the place" bugs. Fixed using $and to combine both
+       conditions correctly.
+    2. The old query had NO "is_premium" filter at all — it was
+       auto-crediting every user, free and premium alike, completely
+       contradicting "free = manual only". Fixed by scoping the query to
+       is_premium: True.
+
+    Runs every 10 minutes (not hourly) so a premium user's reward lands
+    close to the actual 24h mark instead of up to an hour late.
+    """
     while True:
         try:
-            await asyncio.sleep(3600)  # check hourly
+            await asyncio.sleep(600)  # check every 10 minutes
             now = ts()
             db = get_db()
-            # Find users whose last_daily was 24h+ ago and haven't claimed
-            users = await db.users.find(
-                {"is_banned": {"$ne": True},
-                 "last_daily": {"$lt": now - 86400},
-                 "last_daily": {"$gt": 0}},  # exclude new users
-            ).to_list(10000)
+            users = await db.users.find({
+                "is_banned": {"$ne": True},
+                "is_premium": True,
+                "$and": [
+                    {"last_daily": {"$lt": now - 86400}},
+                    {"last_daily": {"$gt": 0}},  # exclude users who've never claimed once
+                ],
+            }).to_list(10000)
             for u in users:
                 uid = u["_id"]
-                reward = DAILY_PREMIUM if u.get("is_premium") else DAILY_NORMAL
+                reward = DAILY_PREMIUM
+                # Keep streak logic consistent with the manual /daily
+                # claim above — an auto-claim should count toward (or
+                # reset) the streak exactly the same way a manual one
+                # would, so premium users don't see their streak behave
+                # differently just because it was auto-credited.
+                prev_streak = u.get("daily_streak", 0)
+                hours_since_last = (now - u["last_daily"]) / 3600 if u.get("last_daily", 0) > 0 else 999
+                new_streak = prev_streak + 1 if hours_since_last < 48 else 1
+                max_streak = max(u.get("max_streak", 0), new_streak)
                 await db.users.update_one({"_id": uid}, {
-                    "$inc": {"balance": reward, "xp": 50},
-                    "$set": {"last_daily": now, "daily_kills": 0, "daily_robs": 0}
+                    "$inc": {"balance": reward, "xp": 100},
+                    "$set": {"last_daily": now, "daily_kills": 0, "daily_robs": 0,
+                             "daily_streak": new_streak, "max_streak": max_streak}
                 })
-                # Notify user in DM silently
                 try:
                     await bot.send_message(
                         uid,
-                        f"🎁 {sc('Auto Daily Claimed!')} +{fmt(reward)}\n"
-                        f"{sc('Your daily reward was auto-credited!')} 💰",
+                        f"🎁 {sc('Auto Daily Claimed!')} +{fmt(reward)} 💓\n"
+                        f"🔥 {sc('Streak')}: {new_streak} day{'s' if new_streak != 1 else ''}\n"
+                        f"{sc('Your premium daily reward was auto-credited!')} 💰",
                         parse_mode="HTML"
                     )
                 except Exception:
                     pass
         except Exception:
-            pass
+            logger.exception("auto_daily_job: unexpected error in loop")
 
 # ── /bal ──────────────────────────────────────────────────────────────────────
+@economy_gate
 async def bal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message; u = update.effective_user
-    if msg.reply_to_message and msg.reply_to_message.from_user:
+    checking_other = bool(msg.reply_to_message and msg.reply_to_message.from_user
+                           and msg.reply_to_message.from_user.id != u.id)
+    if checking_other:
         tu = msg.reply_to_message.from_user
         await ensure_user(tu.id, tu.username or "", tu.full_name)
         d = await get_user(tu.id)
@@ -103,14 +248,38 @@ async def bal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     rank = await get_user_rank(d["_id"])
     lv   = xp_level(d["xp"]); xp_in_lv = d["xp"] % (lv * XP_PER_LEVEL)
     now  = ts()
+    is_private = update.effective_chat.type == "private"
+
+    # 🔴 PRIVACY FIX: exact protection countdown ("23h 57m") used to be
+    # shown to EVERYONE, for EVERYONE, in groups — completely bypassing
+    # the privacy /check already carefully implements (premium-only can
+    # check others, and even then only via DM). That leak told any user
+    # exactly how much longer a target's protection lasts, making it
+    # trivial to time an attack for the moment it expires.
+    #
+    # New rule, matching /check:
+    #  • Your OWN status in DM → full detail (exact time).
+    #  • Your OWN status in a GROUP → generic only publicly; full detail
+    #    is DM'd to you, with a note to check your DM.
+    #  • Someone ELSE's status, anywhere → generic only ("Protected" or
+    #    "Not protected"), NEVER the exact remaining time. Use /check
+    #    (premium-only, DM'd) to see another user's exact time.
     if d["dead_until"] > now:
         rem = d["dead_until"]-now
         status = f"💀 {sc('Dead')} ({rem//3600}h {(rem%3600)//60}m)"
     elif d["protected_until"] > now:
-        rem = d["protected_until"]-now
-        status = f"🛡️ {sc('Protected')} ({rem//3600}h {(rem%3600)//60}m)"
+        if checking_other:
+            # Never reveal another user's exact countdown here — that's
+            # exactly the leak this fix closes. Direct them to /check.
+            status = f"🛡️ {sc('Protected')} (use /check for details)"
+        elif is_private:
+            rem = d["protected_until"]-now
+            status = f"🛡️ {sc('Protected')} ({rem//3600}h {(rem%3600)//60}m)"
+        else:
+            status = f"🛡️ {sc('Protected')} (DM me /check for exact time)"
     else:
         status = f"✅ {sc('Alive')}"
+
     await msg.reply_html(
         f"👤 {bold_sc('Name')}: {mention(tu)}\n"
         f"💰 {bold_sc('Balance')}: {fmt(d['balance'])}\n"
@@ -121,13 +290,14 @@ async def bal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 # ── /rob ──────────────────────────────────────────────────────────────────────
+@economy_gate
 async def rob_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user; msg = update.effective_message
     await ensure_user(u.id, u.username or "", u.full_name)
     robber = await get_user(u.id); now = ts()
     if robber.get("is_banned"): await msg.reply_html("🚫 Banned!"); return
     if not msg.reply_to_message or not msg.reply_to_message.from_user:
-        await msg.reply_html(f"⚠️ {sc('Usage')}: /rob <{sc('reply to user')}>"); return
+        await msg.reply_html(f"⚠️ {sc('Usage')}: /rob <amount> (reply to user)"); return
     vu = msg.reply_to_message.from_user
     if vu.id == u.id or vu.is_bot: await msg.reply_html("❌ Invalid!"); return
     if msg.reply_to_message.date:
@@ -142,16 +312,38 @@ async def rob_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await ensure_user(vu.id, vu.username or "", vu.full_name)
     victim = await get_user(vu.id)
     if victim["protected_until"] > now:
-        rem = victim["protected_until"]-now
-        await msg.reply_html(f"🛡️ {mention(vu)} {sc('Is Protected For')} <b>{rem//3600}h {(rem%3600)//60}m</b>!"); return
+        # 🔴 PRIVACY FIX: no longer reveals the exact remaining time to
+        # the attacker — same class of leak as the old /bal bug. Use
+        # /check (premium-only, sent via DM) to see an exact countdown.
+        await msg.reply_html(f"🛡️ {mention(vu)} {sc('is protected right now — try again later!')}"); return
     if victim["dead_until"] > now:
         await msg.reply_html(f"💀 {mention(vu)} {sc('Is Already Dead!')}"); return
     max_rob = ROB_MAX_PREMIUM if robber.get("is_premium") else ROB_MAX_NORMAL
     tax     = TAX_PREMIUM     if robber.get("is_premium") else TAX_NORMAL
-    rob_amt = min(random.randint(100, max_rob), victim["balance"])
+
+    # 🔴 FIX: /rob <amount> used to completely ignore the amount the user
+    # typed — it always rolled a random number between 100 and max_rob
+    # regardless of what was requested. "/rob 50" robbing $147, or
+    # "/rob 100" reporting the victim had $0 (when they may well have
+    # had exactly 100), was this bug: the number typed had NO effect on
+    # the outcome at all. Now the requested amount is actually honored,
+    # capped by the tier's max-per-rob limit and the victim's balance —
+    # exactly what a player would reasonably expect "/rob 50" to mean.
+    if context.args:
+        try:
+            requested = int(context.args[0])
+            if requested <= 0:
+                await msg.reply_html("❌ Amount must be a positive number!"); return
+        except ValueError:
+            await msg.reply_html(f"❌ {sc('Usage')}: /rob <amount> (reply to user)"); return
+        rob_amt = min(requested, max_rob, victim["balance"])
+    else:
+        # No amount given — fall back to the original random-roll behaviour.
+        rob_amt = min(random.randint(100, max_rob), victim["balance"])
+
     if rob_amt <= 0:
         await msg.reply_html(
-            f"👤 {mention(vu)} {sc('Rᴏʙʙᴇᴅ')} $0 {sc('Fʀᴏᴍ')} {mention(vu)}\n"
+            f"👤 {mention(u)} {sc('Tried To Rob')} {mention(vu)}\n"
             f"💸 {mention(vu)} {sc('Has No Money!')}"
         ); return
     fee = int(rob_amt*tax); net = rob_amt-fee
@@ -164,7 +356,27 @@ async def rob_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"💰 {sc('Gᴀɪɴᴇᴅ')} {fmt(net)}, +{xp_gain} {sc('Xᴘ Aꜰᴛᴇʀ')} {int(tax*100)}% {sc('Dᴇᴅᴜᴄᴛɪᴏɴ')}."
     )
 
+    # 🆕 High-value theft alert: if a significant amount (5000+) was
+    # stolen, DM the victim directly so they find out even if they're
+    # not actively watching the group chat right now — this was
+    # explicitly requested as a new feature. Wrapped in try/except since
+    # a DM can fail (victim never started the bot in DM, blocked it,
+    # etc.) and that should never break the rob command itself.
+    if rob_amt >= HIGH_VALUE_THEFT_THRESHOLD:
+        try:
+            await context.bot.send_message(
+                vu.id,
+                f"🚨 <b>Big Theft Alert!</b>\n\n"
+                f"{mention(u)} robbed <b>{fmt(rob_amt)}</b> coins from you!\n"
+                f"💼 Your new balance: {fmt(victim['balance'] - rob_amt)}\n\n"
+                f"💡 Tip: use /protect to guard your coins from future robberies.",
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            logger.debug(f"rob_cmd: high-value theft DM alert failed for {vu.id}: {e}")
+
 # ── /kill ─────────────────────────────────────────────────────────────────────
+@economy_gate
 async def kill_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user; msg = update.effective_message
     await ensure_user(u.id, u.username or "", u.full_name)
@@ -185,8 +397,10 @@ async def kill_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await ensure_user(vu.id, vu.username or "", vu.full_name)
     victim = await get_user(vu.id)
     if victim["protected_until"] > now:
-        rem = victim["protected_until"]-now
-        await msg.reply_html(f"🛡️ {mention(vu)} {sc('Is Protected For')} <b>{rem//3600}h {(rem%3600)//60}m</b>!"); return
+        # 🔴 PRIVACY FIX: no longer reveals the exact remaining time to
+        # the attacker — same class of leak as the old /bal bug. Use
+        # /check (premium-only, sent via DM) to see an exact countdown.
+        await msg.reply_html(f"🛡️ {mention(vu)} {sc('is protected right now — try again later!')}"); return
     if victim["dead_until"] > now:
         await msg.reply_html(f"💀 {mention(vu)} {sc('Is Already Dead!')}"); return
     rng  = KILL_REWARD_PREMIUM if killer.get("is_premium") else KILL_REWARD_NORMAL
@@ -202,6 +416,7 @@ async def kill_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 # ── /revive — 600 coins cost ──────────────────────────────────────────────────
+@economy_gate
 async def revive_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message; u = update.effective_user; now = ts()
     await ensure_user(u.id, u.username or "", u.full_name)
@@ -231,7 +446,8 @@ async def revive_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"💚 {mention(u)} {sc('Revived')} {mention(tu)}! -{fmt(cost)}"
         )
 
-# ── /protect — 1d FREE, 2d premium ───────────────────────────────────────────
+# ── /protect — 1d = 400 coins, 2d premium ────────────────────────────────────
+@economy_gate
 async def protect_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user; args = context.args
     await ensure_user(u.id, u.username or "", u.full_name)
@@ -248,7 +464,7 @@ async def protect_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not args or args[0].lower() not in dm:
         await update.message.reply_html(
             f"⚠️ {sc('Usage')}: /protect 1d/2d\n"
-            f"🆓 1d = <b>FREE</b> for all\n"
+            f"🛡️ 1d = {fmt(PROTECT_1D_COST)} coins\n"
             f"💓 2d = Premium only ({fmt(PROTECT_2D_COST)} coins)"
         ); return
     days = dm[args[0].lower()]
@@ -264,7 +480,13 @@ async def protect_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ); return
         await update_user(u.id, balance=d["balance"]-cost)
     else:
-        cost = 0  # 1d is FREE
+        cost = PROTECT_1D_COST  # now 400 coins (was free)
+        if cost > 0:
+            if d["balance"] < cost:
+                await update.message.reply_html(
+                    f"❌ {sc('Need')} {fmt(cost)}, {sc('you have')} {fmt(d['balance'])}"
+                ); return
+            await update_user(u.id, balance=d["balance"]-cost)
     until = now + days*86400
     await update_user(u.id, protected_until=until)
     dead_note = f"\n🔄 {sc('But Your Status Is Still Dead Until Revive.')}" if d["dead_until"] > now else ""
@@ -275,14 +497,17 @@ async def protect_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 # ── /give ─────────────────────────────────────────────────────────────────────
+@economy_gate
 async def give_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message; u = update.effective_user
     await ensure_user(u.id, u.username or "", u.full_name); giver = await get_user(u.id)
     if not msg.reply_to_message or not msg.reply_to_message.from_user:
         await msg.reply_html(f"💸 {sc('Reply To A User To Give Balance.')}"); return
-    if not context.args: await msg.reply_html("❌ Usage: /give [reply] <amount>"); return
+    if not context.args: await msg.reply_html("❌ Usage: /give [reply] &lt;amount&gt;"); return
     try: amount = int(context.args[0])
-    except: await msg.reply_html("❌ Invalid amount!"); return
+    except Exception as e:
+        logger.debug(f"Suppressed error in economy.py: {e}")
+        await msg.reply_html("❌ Invalid amount!"); return
     if amount <= 0: await msg.reply_html("❌ Positive only!"); return
     tax = TAX_PREMIUM if giver.get("is_premium") else TAX_NORMAL
     total = amount + int(amount*tax)
@@ -299,6 +524,7 @@ async def give_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 # ── /toprich ──────────────────────────────────────────────────────────────────
+@economy_gate
 async def toprich_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     rows = await get_top_rich(10)
     medals = ["🥇","🥈","🥉","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"]
@@ -310,6 +536,7 @@ async def toprich_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text += f"\n💓 = {sc('Premium')} • 👤 = {sc('Normal')}\n✅ {sc('Upgrade To Premium')}: /pay"
     await update.message.reply_html(text)
 
+@economy_gate
 async def topkill_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     rows = await get_top_kill(10)
     medals = ["🥇","🥈","🥉","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"]
@@ -321,6 +548,7 @@ async def topkill_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_html(text)
 
 # ── /wallet ───────────────────────────────────────────────────────────────────
+@economy_gate
 async def wallet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user
     await ensure_user(u.id, u.username or "", u.full_name); d = await get_user(u.id)
@@ -334,11 +562,13 @@ async def wallet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"💼 <b>{sc('Wallet')} — {mention(u)}</b>\n\n"
             f"💰 {sc('Balance')}: {fmt(d['balance'])}\n"
             f"🏦 {sc('Wallet')}: {fmt(d.get('wallet',0))}\n\n"
-            "/wallet deposit <amount>\n/wallet withdraw <amount>"
+            "/wallet deposit &lt;amount&gt;\n/wallet withdraw &lt;amount&gt;"
         ); return
     action = args[0].lower()
     try: amount = int(args[1]) if len(args)>1 else 0
-    except: await update.message.reply_html("❌ Invalid!"); return
+    except Exception as e:
+        logger.debug(f"Suppressed error in economy.py: {e}")
+        await update.message.reply_html("❌ Invalid!"); return
     if amount <= 0: await update.message.reply_html("❌ Positive only!"); return
     if action == "deposit":
         if d["balance"] < amount: await update.message.reply_html("❌ Not enough!"); return
@@ -349,9 +579,10 @@ async def wallet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update_user(u.id, wallet=d.get("wallet",0)-amount, balance=d["balance"]+amount)
         await update.message.reply_html(f"✅ {sc('Withdrew')} {fmt(amount)} {sc('From Wallet!')} 💰")
     else:
-        await update.message.reply_html("❌ Use: /wallet deposit/withdraw <amount>")
+        await update.message.reply_html("❌ Use: /wallet deposit/withdraw &lt;amount&gt;")
 
 # ── /rank ─────────────────────────────────────────────────────────────────────
+@economy_gate
 async def rank_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     tu = msg.reply_to_message.from_user if (msg.reply_to_message and msg.reply_to_message.from_user) else update.effective_user
@@ -368,21 +599,29 @@ async def rank_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🎖️ {sc('Rank')}: {pos} / {total}"
     )
 
+@economy_gate
 async def pfp_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Shows the target user's actual Telegram profile picture together with
+    their stats. Previously this command only printed stats text and
+    never fetched any picture at all — that's why no PFP ever showed up.
+    """
     msg = update.effective_message
     tu = msg.reply_to_message.from_user if (msg.reply_to_message and msg.reply_to_message.from_user) else update.effective_user
     await ensure_user(tu.id, tu.username or "", tu.full_name)
     d = await get_user(tu.id); now = ts()
     dk_max = DAILY_KILLS_PREMIUM if d.get("is_premium") else DAILY_KILLS_NORMAL
     dr_max = DAILY_ROBS_PREMIUM  if d.get("is_premium") else DAILY_ROBS_NORMAL
-    await msg.reply_html(
+    caption = (
         f"📊 <b>{sc('Stats')} — {mention(tu)}</b>\n\n"
         f"☠️ {sc('Daily Kills')}: {d.get('daily_kills',0)}/{dk_max}\n"
         f"🔪 {sc('Daily Robs')}: {d.get('daily_robs',0)}/{dr_max}\n"
         f"💎 {sc('Gems')}: {d.get('gems',0)}\n"
         f"💼 {sc('Wallet')}: {fmt(d.get('wallet',0))}"
     )
+    await send_profile_photo_or_text(msg, context, tu.id, caption)
 
+@economy_gate
 async def gems_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user
     await ensure_user(u.id, u.username or "", u.full_name); d = await get_user(u.id)
@@ -404,13 +643,16 @@ async def gems_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"/fgems — {sc('Buy with Telegram Stars')}"
     )
 
+@economy_gate
 async def claim_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat; u = update.effective_user
     if chat.type == "private":
         await update.message.reply_html(f"🚫 {sc('This Command Works Only In Groups.')}"); return
     await ensure_user(u.id, u.username or "", u.full_name)
     try: count = await context.bot.get_chat_member_count(chat.id)
-    except: count = 0
+    except Exception as e:
+        logger.debug(f"Suppressed error in economy.py: {e}")
+        count = 0
     if count < 500:
         await update.message.reply_html(
             f"❌ {sc('Group Needs 500+ Members!')} {sc('Currently')}: <b>{count}</b>"
@@ -476,12 +718,14 @@ async def create_coupon_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     from utils.helpers import is_admin
     if not await is_admin(update, context): await update.message.reply_html("❌ Admins only!"); return
     args = context.args
-    if len(args) < 2: await update.message.reply_html("Usage: /create_coupon <code> <amount>"); return
+    if len(args) < 2: await update.message.reply_html("Usage: /create_coupon <code> &lt;amount&gt;"); return
     if await get_group_coupon(chat.id):
         await update.message.reply_html(f"❌ {sc('Already Have A Coupon!')} /del_coupon"); return
     code = args[0].lower()
     try: amount = int(args[1])
-    except: await update.message.reply_html("❌ Invalid amount!"); return
+    except Exception as e:
+        logger.debug(f"Suppressed error in economy.py: {e}")
+        await update.message.reply_html("❌ Invalid amount!"); return
     await set_group_coupon(chat.id, code, amount, u.id)
     await update.message.reply_html(
         f"🎟️ {sc('Coupon Created!')}\n"
@@ -535,6 +779,7 @@ async def eco_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 # ── Group economy stubs ───────────────────────────────────────────────────────
+@economy_gate
 async def gbal_cmd(update, context):
     u=update.effective_user; chat=update.effective_chat
     if chat.type=="private": await update.message.reply_html(f"🚫 {sc('Group Only!')}"); return
@@ -544,6 +789,7 @@ async def gbal_cmd(update, context):
         f"💰 {fmt(g['balance'])} | 💀 {g['kills']} | 🔫 {g['robs']}"
     )
 
+@economy_gate
 async def gkill_cmd(update, context):
     u=update.effective_user; msg=update.effective_message; chat=update.effective_chat; now=ts()
     if chat.type=="private": await msg.reply_html(f"🚫 {sc('Group Only!')}"); return
@@ -560,6 +806,7 @@ async def gkill_cmd(update, context):
     await update_guser(u.id,chat.id,balance=gk["balance"]+r,kills=gk["kills"]+1)
     await msg.reply_html(f"💀 {mention(u)} {sc('Killed')} {mention(vu)}!\n💰 +{fmt(r)}")
 
+@economy_gate
 async def grob_cmd(update, context):
     u=update.effective_user; msg=update.effective_message; chat=update.effective_chat; now=ts()
     if chat.type=="private": await msg.reply_html(f"🚫 {sc('Group Only!')}"); return
@@ -577,6 +824,7 @@ async def grob_cmd(update, context):
     await update_guser(u.id,chat.id,balance=gr["balance"]+amt,robs=gr["robs"]+1)
     await msg.reply_html(f"🔫 {mention(u)} {sc('Robbed')} {mention(vu)}!\n💰 +{fmt(amt)}")
 
+@economy_gate
 async def grevive_cmd(update, context):
     u=update.effective_user; msg=update.effective_message; chat=update.effective_chat; now=ts()
     if chat.type=="private": await msg.reply_html(f"🚫 {sc('Group Only!')}"); return
@@ -586,6 +834,7 @@ async def grevive_cmd(update, context):
     await update_guser(tu.id,chat.id,dead_until=0)
     await msg.reply_html(f"💚 {mention(u)} {sc('Revived')} {mention(tu)}!")
 
+@economy_gate
 async def gprotect_cmd(update, context):
     u=update.effective_user; chat=update.effective_chat; now=ts()
     if chat.type=="private": await update.message.reply_html(f"🚫 {sc('Group Only!')}"); return
@@ -594,6 +843,7 @@ async def gprotect_cmd(update, context):
     await update_guser(u.id,chat.id,balance=g["balance"]-400,protected_until=now+86400)
     await update.message.reply_html(f"🛡️ {mention(u)} {sc('Protected In Group For 1 Day!')}")
 
+@economy_gate
 async def gcheck_cmd(update, context):
     msg=update.effective_message; chat=update.effective_chat; now=ts()
     tu=msg.reply_to_message.from_user if (msg.reply_to_message and msg.reply_to_message.from_user) else update.effective_user
@@ -604,13 +854,14 @@ async def gcheck_cmd(update, context):
     else:
         await msg.reply_html(f"❌ {sc('No Group Protection')}")
 
+@economy_gate
 async def granks_cmd(update, context):
     chat=update.effective_chat
     if chat.type=="private": await update.message.reply_html(f"🚫 {sc('Group Only!')}"); return
     rows=await get_granks(chat.id)
     if not rows: await update.message.reply_html(f"📊 {sc('No Data Yet!')}"); return
     medals=["🥇","🥈","🥉","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"]
-    text=f"🏆 <b>{sc('Group Ranks')} — {chat.title}</b>\n\n"
+    text=f"🏆 <b>{sc('Group Ranks')} — {safe_html(chat.title)}</b>\n\n"
     for i,r in enumerate(rows):
         name=r.get("full_name") or r.get("username") or "User"
         text+=f"{medals[i]} {mention_id(r['user_id'],name)} — {fmt(r['balance'])}\n"

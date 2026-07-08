@@ -15,12 +15,18 @@ Iota Extra Games & Fun Features
 """
 import random
 import asyncio
+import json
+import logging
 import aiohttp
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import ContextTypes
 from utils.mongo_db import ensure_user, get_user, update_user, add_balance
 from utils.helpers import mention, fmt
+from utils.ai_provider import call_ai
+from utils.system_gate import games_gate
 from config import SARVAM_API_KEY, SARVAM_CHAT_URL
+
+logger = logging.getLogger(__name__)
 
 # ── Active game state ─────────────────────────────────────────────────────────
 _ttt_games: dict = {}   # chat_id -> game
@@ -59,6 +65,7 @@ def _ttt_kb(gid, board):
     return InlineKeyboardMarkup(rows)
 
 
+@games_gate
 async def tictactoe_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user; msg = update.effective_message
     chat = update.effective_chat
@@ -144,6 +151,7 @@ RPS_EMOJI = {"rock": "🪨", "paper": "📄", "scissors": "✂️"}
 RPS_WINS  = {"rock": "scissors", "paper": "rock", "scissors": "paper"}
 
 
+@games_gate
 async def rps_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user; msg = update.effective_message
     await ensure_user(u.id, u.username or "", u.full_name)
@@ -198,6 +206,7 @@ HANGMAN_WORDS = [
 HANGMAN_STAGES = ["😵","😦","😟","😨","😰","😱","💀"]
 
 
+@games_gate
 async def hangman_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user; chat = update.effective_chat
     await ensure_user(u.id, u.username or "", u.full_name)
@@ -276,24 +285,106 @@ QUIZ_QUESTIONS = [
     {"q": "What language does 'Bot' come from?", "opts": ["Latin","Greek","Robot","German"], "ans": 2},
 ]
 
+QUIZ_CATEGORIES = [
+    "general knowledge", "science", "history", "geography", "sports",
+    "movies", "technology", "space", "animals", "food", "math", "music",
+]
 
+
+async def _ai_generate_quiz(category: str = None) -> dict:
+    """
+    Use AI to generate a fresh, unique quiz question on the fly.
+    Returns dict: {"q": str, "opts": [4 strings], "ans": int 0-3}
+    Falls back to None on failure (caller uses static list instead).
+    """
+    cat = category or random.choice(QUIZ_CATEGORIES)
+    prompt = (
+        f"Generate ONE unique, interesting trivia quiz question about "
+        f"{cat}. Make it medium difficulty, fun, and not overly common.\n\n"
+        f"Respond with ONLY valid JSON, no markdown, no extra text, in "
+        f"exactly this format:\n"
+        f'{{"question": "...", "options": ["A","B","C","D"], '
+        f'"correct_index": 0}}\n\n'
+        f"correct_index must be 0, 1, 2, or 3 (zero-based index into options)."
+    )
+    try:
+        messages = [
+            {"role": "system", "content": "You are a quiz question generator. Output ONLY valid JSON, nothing else."},
+            {"role": "user", "content": prompt}
+        ]
+        raw = await call_ai(messages, is_premium=False, max_tokens=300, temperature=1.0)
+        raw = raw.strip()
+        # Strip markdown fences if model added them anyway
+        if raw.startswith("```"):
+            raw = raw.strip("`")
+            if raw.lower().startswith("json"):
+                raw = raw[4:]
+        data = json.loads(raw)
+        q       = data["question"]
+        opts    = data["options"]
+        ans_idx = int(data["correct_index"])
+        if len(opts) != 4 or not (0 <= ans_idx <= 3) or not q:
+            return None
+        return {"q": q, "opts": opts, "ans": ans_idx, "category": cat}
+    except Exception:
+        return None
+
+
+@games_gate
 async def quiz_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat; u = update.effective_user
     await ensure_user(u.id, u.username or "", u.full_name)
-    q_data = random.choice(QUIZ_QUESTIONS)
+
+    category = " ".join(context.args).lower() if context.args else None
+
+    thinking = await update.message.reply_html("🧠 Quiz bana rahi hoon...")
+
+    # Try AI-generated question first (fresh, unique every time)
+    q_data = await _ai_generate_quiz(category)
+    ai_generated = q_data is not None
+
+    # Fallback to static bank if AI fails
+    if not q_data:
+        q_data = random.choice(QUIZ_QUESTIONS)
+
     import uuid; gid = str(uuid.uuid4())[:6]
-    _quiz_games[gid] = {"chat_id": chat.id, "answer": q_data["ans"], "reward": 300}
-    kb = InlineKeyboardMarkup([[
-        InlineKeyboardButton(f"{i+1}. {opt}", callback_data=f"quiz_{gid}_{i}")
-        for i, opt in enumerate(q_data["opts"][:2])
-    ],[
-        InlineKeyboardButton(f"{i+3}. {opt}", callback_data=f"quiz_{gid}_{i+2}")
-        for i, opt in enumerate(q_data["opts"][2:])
-    ]])
-    await update.message.reply_html(
-        f"❓ <b>Quiz!</b>\n\n{q_data['q']}\n\n💰 Reward: $300",
+    reward = random.randint(250, 500)
+    _quiz_games[gid] = {"chat_id": chat.id, "answer": q_data["ans"], "reward": reward}
+
+    opts = q_data["opts"]
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"A) {opts[0]}", callback_data=f"quiz_{gid}_0"),
+         InlineKeyboardButton(f"B) {opts[1]}", callback_data=f"quiz_{gid}_1")],
+        [InlineKeyboardButton(f"C) {opts[2]}", callback_data=f"quiz_{gid}_2"),
+         InlineKeyboardButton(f"D) {opts[3]}", callback_data=f"quiz_{gid}_3")],
+    ])
+
+    tag = "🤖 AI Quiz" if ai_generated else "❓ Quiz"
+    cat_txt = f"\n📂 Category: <i>{q_data.get('category', category or 'general')}</i>" if ai_generated else ""
+
+    await thinking.edit_text(
+        f"{tag}!{cat_txt}\n\n<b>{q_data['q']}</b>\n\n💰 Reward: {fmt(reward)}",
+        parse_mode="HTML",
         reply_markup=kb
     )
+
+    # Auto-close after 45s if no one answers
+    asyncio.create_task(_quiz_timeout(context, gid, 45))
+
+
+async def _quiz_timeout(context, gid: str, secs: int):
+    await asyncio.sleep(secs)
+    game = _quiz_games.pop(gid, None)
+    if not game:
+        return  # already answered
+    try:
+        await context.bot.send_message(
+            game["chat_id"],
+            "⏱️ Quiz time khatam! Koi nahi jeeta. /quiz se phir try karo!",
+            parse_mode="HTML"
+        )
+    except Exception:
+        pass
 
 
 async def quiz_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -351,6 +442,12 @@ async def ship_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 #  COMPLIMENT & ROAST (AI powered)
 # ═══════════════════════════════════════════════════════════════════════
 
+# 🔴 UPGRADED: compliment/roast/meme now generate fresh AI content every
+# time instead of picking from a small fixed list (the same handful of
+# lines repeating gets old fast, and users notice). Static lists kept
+# ONLY as an offline fallback if the AI call fails, so these commands
+# still always reply with something rather than erroring out.
+
 COMPLIMENTS = [
     "You light up every room you walk into! ✨",
     "Your smile could end wars! 💫",
@@ -370,11 +467,33 @@ ROASTS = [
     "You're proof that evolution can go in reverse! 🐒",
 ]
 
+_COMPLIMENT_SYSTEM = (
+    "You are Iota, a cute Hinglish-speaking Telegram bot girl. Give a "
+    "short, warm, genuine compliment — 1-2 lines, playful and sweet. "
+    "Plain text with emojis, no markdown asterisks. Make it fresh and "
+    "different each time, not generic."
+)
+_ROAST_SYSTEM = (
+    "You are Iota, a sassy Hinglish-speaking Telegram bot girl. Give a "
+    "short, playful, light-hearted roast — 1-2 lines, teasing but never "
+    "genuinely mean (no slurs, no real insults about appearance/family/"
+    "sensitive topics). Plain text with emojis, no markdown asterisks."
+)
+
 
 async def compliment_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message; u = update.effective_user
     target = msg.reply_to_message.from_user if (msg.reply_to_message and msg.reply_to_message.from_user) else u
-    await msg.reply_html(f"💖 {mention(target)}\n\n{random.choice(COMPLIMENTS)}")
+    try:
+        text = await call_ai(
+            [{"role": "system", "content": _COMPLIMENT_SYSTEM},
+             {"role": "user", "content": f"Give {target.first_name} a compliment."}],
+            is_premium=False, max_tokens=100, temperature=1.0,
+        )
+    except Exception as e:
+        logger.debug(f"compliment_cmd AI failed, using fallback: {e}")
+        text = random.choice(COMPLIMENTS)
+    await msg.reply_html(f"💖 {mention(target)}\n\n{text}")
 
 
 async def roast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -382,7 +501,16 @@ async def roast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not msg.reply_to_message or not msg.reply_to_message.from_user:
         await msg.reply_html("❌ Reply to someone to roast them!"); return
     target = msg.reply_to_message.from_user
-    await msg.reply_html(f"🔥 {mention(target)}\n\n{random.choice(ROASTS)}")
+    try:
+        text = await call_ai(
+            [{"role": "system", "content": _ROAST_SYSTEM},
+             {"role": "user", "content": f"Roast {target.first_name} playfully."}],
+            is_premium=False, max_tokens=100, temperature=1.0,
+        )
+    except Exception as e:
+        logger.debug(f"roast_cmd AI failed, using fallback: {e}")
+        text = random.choice(ROASTS)
+    await msg.reply_html(f"🔥 {mention(target)}\n\n{text}")
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -402,7 +530,7 @@ async def horoscope_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if not args:
         await update.message.reply_html(
-            "🌟 Usage: /horoscope <sign>\n\n"
+            "🌟 Usage: /horoscope &lt;sign&gt;\n\n"
             "Signs: " + " | ".join(SIGNS)
         ); return
     sign = args[0].lower()
@@ -473,14 +601,44 @@ MEME_GIFS = [
     "https://media.giphy.com/media/xT9IgG50Lg7rusXgqU/giphy.gif",
 ]
 
+_MEME_CAPTION_SYSTEM = (
+    "You are Iota, a witty Hinglish-speaking Telegram bot girl. Write a "
+    "single short, funny meme-style caption — 1 line, relatable Telegram/"
+    "group-chat humor. Plain text with emojis, no markdown asterisks. "
+    "Make it fresh and different each time."
+)
+
 
 async def meme_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    caption = random.choice(MEME_CAPTIONS)
-    gif_url = random.choice(MEME_GIFS)
+    # 🔴 FIX: MEME_GIFS above contained the same hardcoded giphy.com media
+    # IDs that had rotted across this whole bot (confirmed dead — HTTP 403
+    # on every one). Captions now come fresh from the AI each time
+    # instead of a small repeating list, and the GIF comes from the live
+    # GIPHY search already used everywhere else in the bot.
     try:
-        await update.message.reply_animation(gif_url, caption=f"😂 {caption}")
-    except Exception:
-        await update.message.reply_html(f"😂 <b>Meme</b>\n\n{caption}")
+        caption = await call_ai(
+            [{"role": "system", "content": _MEME_CAPTION_SYSTEM},
+             {"role": "user", "content": "Give me a funny meme caption."}],
+            is_premium=False, max_tokens=60, temperature=1.1,
+        )
+    except Exception as e:
+        logger.debug(f"meme_cmd AI caption failed, using fallback: {e}")
+        caption = random.choice(MEME_CAPTIONS)
+
+    gif_url = None
+    try:
+        from utils.gif_provider import get_gif_for_mood
+        gif_url = await get_gif_for_mood("laugh")
+    except Exception as e:
+        logger.debug(f"meme_cmd live GIF fetch failed: {e}")
+
+    if gif_url:
+        try:
+            await update.message.reply_animation(gif_url, caption=f"😂 {caption}")
+            return
+        except Exception as e:
+            logger.debug(f"meme_cmd GIF send failed: {e}")
+    await update.message.reply_html(f"😂 <b>Meme</b>\n\n{caption}")
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -533,13 +691,13 @@ async def profile_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tu = update.effective_user
     await ensure_user(tu.id, tu.username or "", tu.full_name)
     d = await get_user(tu.id)
-    from utils.helpers import xp_level, rank_title
+    from utils.helpers import xp_level, rank_title, send_profile_photo_or_text
     lv = xp_level(d["xp"])
     from utils.mongo_db import get_card_rank, get_user_rank
     cr   = await get_card_rank(tu.id)
     rank = await get_user_rank(tu.id)
     icon = d.get("premium_emoji") or ("💓" if d["is_premium"] else "👤")
-    await msg.reply_html(
+    caption = (
         f"🌟 <b>USER PROFILE: {mention(tu)}</b> 🌟\n\n"
         f"════ 💰 Global Wallet ════\n"
         f"💰 Balance: <b>{fmt(d['balance'])}</b>\n"
@@ -557,6 +715,9 @@ async def profile_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"💓 Premium: <b>{'Yes ✅' if d['is_premium'] else 'No'}</b>\n"
         f"(Use /shop to spend coins)"
     )
+    # Show the user's actual Telegram profile picture alongside their
+    # stats. Falls back to text-only automatically if no PFP is set.
+    await send_profile_photo_or_text(msg, context, tu.id, caption)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -585,7 +746,7 @@ async def shop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text += "🏷️ <b>Custom Titles</b>\n"
         for title, price in SHOP_TITLES.items():
             text += f"• <b>{title}</b> — {fmt(price)}\n"
-        text += "\nUse: /shop buy <title>"
+        text += "\nUse: /shop buy &lt;title&gt;"
         await update.message.reply_html(text); return
 
     if args[0].lower() == "buy":
@@ -653,7 +814,7 @@ async def story_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def whatif_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if not args:
-        await update.message.reply_html("Usage: /whatif <scenario>\nExample: /whatif aliens landed today?"); return
+        await update.message.reply_html("Usage: /whatif &lt;scenario&gt;\nExample: /whatif aliens landed today?"); return
     scenario = " ".join(args)
     thinking = await update.message.reply_html("🤔 Imagining...")
     headers = {"api-subscription-key": SARVAM_API_KEY, "Content-Type": "application/json"}
@@ -688,7 +849,7 @@ async def settitle_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_html(
             f"Current title: <b>{d.get('custom_title','None')}</b>\n"
-            "Usage: /settitle <your title>\nCost: $500"
+            "Usage: /settitle &lt;your title&gt;\nCost: $500"
         ); return
     title = " ".join(context.args)[:20]
     cost = 500
@@ -793,7 +954,7 @@ async def remindme_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user; args = context.args
     if len(args) < 2:
         await update.message.reply_html(
-            "⏰ Usage: /remindme <time> <message>\n"
+            "⏰ Usage: /remindme &lt;time&gt; &lt;message&gt;\n"
             "Time: 10m, 1h, 2h, 30m etc\n"
             "Example: /remindme 30m Check the oven!"
         ); return

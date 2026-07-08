@@ -49,13 +49,13 @@ async def set_intro_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if current:
             await msg.reply_html(
                 f"📝 <b>Your current intro:</b>\n\n{current['text']}\n\n"
-                f"Update: /set_intro <new intro text>\n"
+                f"Update: /set_intro &lt;new intro text&gt;\n"
                 f"Delete: /del_intro"
             )
         else:
             await msg.reply_html(
                 f"📝 <b>Set Your Introduction!</b>\n\n"
-                f"Usage: /set_intro <your intro>\n\n"
+                f"Usage: /set_intro &lt;your intro&gt;\n\n"
                 f"Example:\n"
                 f"/set_intro Hi! I'm a gamer from India 🎮 Love anime and coding! "
                 f"Feel free to talk to me anytime 😊"
@@ -96,7 +96,7 @@ async def intro_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not intro:
             await msg.reply_html(
                 f"❌ You haven't set your intro yet!\n"
-                f"Set it first: /set_intro <your intro>"
+                f"Set it first: /set_intro &lt;your intro&gt;"
             ); return
 
         await msg.reply_html(
@@ -113,7 +113,7 @@ async def intro_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             intro = await _get_intro(u.id)
             if not intro:
                 await msg.reply_html(
-                    f"📝 You haven't set your intro!\n/set_intro <your intro>"
+                    f"📝 You haven't set your intro!\n/set_intro &lt;your intro&gt;"
                 ); return
             await msg.reply_html(_format_intro(intro, mention(u)))
         else:
@@ -132,7 +132,7 @@ async def intro_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not intro:
             await msg.reply_html(
                 f"📝 <b>You have no intro set!</b>\n\n"
-                f"Set it: /set_intro <your intro text>\n\n"
+                f"Set it: /set_intro &lt;your intro text&gt;\n\n"
                 f"Then:\n"
                 f"• /intro → Show your intro\n"
                 f"• /intro me [reply] → Introduce yourself to someone\n"
@@ -147,8 +147,17 @@ async def intro_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if target_arg.isdigit():
             uid = int(target_arg)
         else:
-            chat_member = await context.bot.get_chat(f"@{target_arg}")
-            uid = chat_member.id
+            try:
+                chat_member = await context.bot.get_chat(f"@{target_arg}")
+                uid = chat_member.id
+            except Exception:
+                # 🔴 FIX: get_chat("@username") fails often even for real,
+                # known users. Fall back to our own DB before giving up.
+                from utils.mongo_db import get_user_by_username
+                du = await get_user_by_username(target_arg)
+                if not du:
+                    raise
+                uid = du["_id"]
         intro = await _get_intro(uid)
         if not intro:
             await msg.reply_html(f"❌ {sc('That user has no intro set!')}"); return

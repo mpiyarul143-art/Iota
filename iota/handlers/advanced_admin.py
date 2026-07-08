@@ -12,12 +12,19 @@ Iota Advanced Admin System
 - Anti-channel pin
 - Owner Announce (broadcast to all groups)
 """
+import logging
 import asyncio, re, time
 from telegram import Update, ChatPermissions, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import ContextTypes
 from telegram.error import TelegramError
-from utils.mongo_db import get_db, ensure_user, get_user
+from utils.mongo_db import (
+    get_db, ensure_user, get_user,
+    set_note, get_note, delete_note, list_notes, clear_notes,
+)
 from utils.helpers import mention, ts, is_admin
+from utils.safe_html import safe_html
+
+logger = logging.getLogger(__name__)
 
 # ── DB helpers ────────────────────────────────────────────────────────────────
 
@@ -79,21 +86,18 @@ _flood_track: dict = {}   # {chat_id: {user_id: [timestamps]}}
 # ── Notes ─────────────────────────────────────────────────────────────────────
 
 async def _save_note(cid, name, content):
-    await _db().notes.update_one(
-        {"chat_id": cid, "name": name.lower()},
-        {"$set": {"content": content}},
-        upsert=True
-    )
+    await set_note(cid, name, content)
 
 async def _get_note(cid, name):
-    return await _db().notes.find_one({"chat_id": cid, "name": name.lower()})
+    val = await get_note(cid, name)
+    return {"content": val} if val else None
 
 async def _list_notes(cid):
-    cursor = _db().notes.find({"chat_id": cid})
-    return await cursor.to_list(50)
+    keys = await list_notes(cid)
+    return [{"name": k} for k in keys]
 
 async def _del_note(cid, name):
-    await _db().notes.delete_one({"chat_id": cid, "name": name.lower()})
+    await delete_note(cid, name)
 
 # ── Warns (advanced) ──────────────────────────────────────────────────────────
 
@@ -133,7 +137,7 @@ async def lock_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_html(
             "🔒 <b>Lock Types:</b>\n"
             "messages | media | sticker | gif | link | poll | forward | game\n\n"
-            "Usage: /lock <type>"
+            "Usage: /lock &lt;type&gt;"
         ); return
     lock_type = context.args[0].lower()
     field = LOCK_TYPES.get(lock_type)
@@ -147,7 +151,7 @@ async def unlock_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if chat.type == "private": await update.message.reply_html("🚫 Group only!"); return
     if not await is_admin(update, context): await update.message.reply_html("❌ Admins only!"); return
     if not context.args:
-        await update.message.reply_html("Usage: /unlock <type>"); return
+        await update.message.reply_html("Usage: /unlock &lt;type&gt;"); return
     lock_type = context.args[0].lower()
     field = LOCK_TYPES.get(lock_type)
     if not field: await update.message.reply_html(f"❌ Unknown type!"); return
@@ -161,7 +165,7 @@ async def locks_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     gs = await _get_group_settings(chat.id)
     def _s(v): return "🔒" if v else "🔓"
     await update.message.reply_html(
-        f"🔐 <b>Lock Status — {chat.title}</b>\n\n"
+        f"🔐 <b>Lock Status — {safe_html(chat.title)}</b>\n\n"
         f"{_s(gs['lock_messages'])} Messages\n"
         f"{_s(gs['lock_media'])} Media/Photos\n"
         f"{_s(gs['lock_stickers'])} Stickers\n"
@@ -217,7 +221,9 @@ async def lock_enforcement_handler(update: Update, context: ContextTypes.DEFAULT
 async def _auto_del(bot, cid, mid, delay):
     await asyncio.sleep(delay)
     try: await bot.delete_message(cid, mid)
-    except: pass
+    except Exception as e:
+        logger.debug(f"Suppressed error in advanced_admin.py: {e}")
+        pass
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -235,7 +241,7 @@ async def setflood_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_html(
             f"🌊 Flood Control: <b>{status}</b>\n"
             f"Action: <b>{gs['flood_action']}</b>\n\n"
-            "Usage: /setflood <number> — Set flood limit\n"
+            "Usage: /setflood &lt;number&gt; — Set flood limit\n"
             "/setflood off — Disable\n"
             "/floodmode mute/ban/kick"
         ); return
@@ -321,7 +327,7 @@ async def rules_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not gs["rules"]:
         await update.message.reply_html("📋 No rules set! Admins use /setrules"); return
     await update.message.reply_html(
-        f"📋 <b>Rules — {chat.title}</b>\n\n{gs['rules']}"
+        f"📋 <b>Rules — {safe_html(chat.title)}</b>\n\n{safe_html(gs['rules'])}"
     )
 
 
@@ -336,7 +342,7 @@ async def setrules_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif context.args:
         text = " ".join(context.args)
     if not text:
-        await update.message.reply_html("Usage: /setrules <rules text>"); return
+        await update.message.reply_html("Usage: /setrules &lt;rules text&gt;"); return
     await _update_gs(chat.id, rules=text)
     await update.message.reply_html(f"✅ Rules updated!")
 
@@ -356,9 +362,11 @@ async def clearrules_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def setwarnlimit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     if not await is_admin(update, context): await update.message.reply_html("❌ Admins only!"); return
-    if not context.args: await update.message.reply_html("Usage: /setwarnlimit <number>"); return
+    if not context.args: await update.message.reply_html("Usage: /setwarnlimit &lt;number&gt;"); return
     try: limit = int(context.args[0])
-    except: await update.message.reply_html("❌ Invalid number!"); return
+    except Exception as e:
+        logger.debug(f"Suppressed error in advanced_admin.py: {e}")
+        await update.message.reply_html("❌ Invalid number!"); return
     await _update_gs(chat.id, warn_limit=limit)
     await update.message.reply_html(f"⚠️ Warn limit set to <b>{limit}</b>!")
 
@@ -395,11 +403,15 @@ async def warnings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tu = msg.reply_to_message.from_user
     elif context.args:
         try: uid = int(context.args[0])
-        except: await msg.reply_html("❌ Invalid user!"); return
+        except Exception as e:
+            logger.debug(f"Suppressed error in advanced_admin.py: {e}")
+            await msg.reply_html("❌ Invalid user!"); return
         try:
             m = await context.bot.get_chat_member(chat.id, uid)
             tu = m.user
-        except: await msg.reply_html("❌ User not found!"); return
+        except Exception as e:
+            logger.debug(f"Suppressed error in advanced_admin.py: {e}")
+            await msg.reply_html("❌ User not found!"); return
     else:
         tu = update.effective_user
     count = await _count_user_warns(chat.id, tu.id)
@@ -417,7 +429,7 @@ async def save_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message; chat = update.effective_chat
     if not await is_admin(update, context): await update.message.reply_html("❌ Admins only!"); return
     args = context.args
-    if not args: await msg.reply_html("Usage: /save <name> <content>\nOr reply: /save <name>"); return
+    if not args: await msg.reply_html("Usage: /save &lt;name&gt; &lt;content&gt;\nOr reply: /save &lt;name&gt;"); return
     name = args[0].lower()
     if msg.reply_to_message and msg.reply_to_message.text:
         content = msg.reply_to_message.text
@@ -426,7 +438,7 @@ async def save_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await msg.reply_html("❌ Provide content or reply to a message!"); return
     await _save_note(chat.id, name, content)
-    await msg.reply_html(f"✅ Note <b>{name}</b> saved!")
+    await msg.reply_html(f"✅ Note <b>{safe_html(name)}</b> saved!")
 
 
 async def get_note_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -442,16 +454,16 @@ async def get_note_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not name: return
     note = await _get_note(chat.id, name)
     if note:
-        await msg.reply_html(f"📝 <b>{name}</b>\n\n{note['content']}")
+        await msg.reply_html(f"📝 <b>{safe_html(name)}</b>\n\n{safe_html(note['content'])}")
 
 
 async def notes_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     notes = await _list_notes(chat.id)
     if not notes: await update.message.reply_html("📋 No notes saved!"); return
-    text = f"📝 <b>Notes — {chat.title}</b>\n\n"
+    text = f"📝 <b>Notes — {safe_html(chat.title)}</b>\n\n"
     for n in notes:
-        text += f"• #{n['name']}\n"
+        text += f"• #{safe_html(n['name'])}\n"
     text += "\nUse #notename to get a note"
     await update.message.reply_html(text)
 
@@ -459,7 +471,7 @@ async def notes_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def clear_note_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     if not await is_admin(update, context): await update.message.reply_html("❌ Admins only!"); return
-    if not context.args: await update.message.reply_html("Usage: /clear <notename>"); return
+    if not context.args: await update.message.reply_html("Usage: /clear &lt;notename&gt;"); return
     name = context.args[0].lower()
     await _del_note(chat.id, name)
     await update.message.reply_html(f"✅ Note <b>{name}</b> deleted!")
@@ -472,9 +484,11 @@ async def clear_note_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def setlogchannel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     if not await is_admin(update, context): await update.message.reply_html("❌ Admins only!"); return
-    if not context.args: await update.message.reply_html("Usage: /logchannel <channel_id>"); return
+    if not context.args: await update.message.reply_html("Usage: /logchannel &lt;channel_id&gt;"); return
     try: cid = int(context.args[0])
-    except: await update.message.reply_html("❌ Invalid channel ID!"); return
+    except Exception as e:
+        logger.debug(f"Suppressed error in advanced_admin.py: {e}")
+        await update.message.reply_html("❌ Invalid channel ID!"); return
     await _update_gs(chat.id, log_channel=cid)
     await update.message.reply_html(f"✅ Log channel set to <code>{cid}</code>!")
 
@@ -509,7 +523,9 @@ async def clean_service_handler(update: Update, context: ContextTypes.DEFAULT_TY
     gs = await _get_group_settings(chat.id)
     if gs["clean_service"]:
         try: await msg.delete()
-        except: pass
+        except Exception as e:
+            logger.debug(f"Suppressed error in advanced_admin.py: {e}")
+            pass
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -534,7 +550,9 @@ async def channel_pin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     gs = await _get_group_settings(chat.id)
     if gs["anti_channel_pin"]:
         try: await context.bot.unpin_chat_message(chat.id, msg.pinned_message.message_id)
-        except: pass
+        except Exception as e:
+            logger.debug(f"Suppressed error in advanced_admin.py: {e}")
+            pass
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -544,7 +562,7 @@ async def channel_pin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def disable_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     if not await is_admin(update, context): await update.message.reply_html("❌ Admins only!"); return
-    if not context.args: await update.message.reply_html("Usage: /disable <command>"); return
+    if not context.args: await update.message.reply_html("Usage: /disable &lt;command&gt;"); return
     cmd = context.args[0].lstrip("/").lower()
     gs = await _get_group_settings(chat.id)
     disabled = gs["disabled_cmds"]
@@ -557,7 +575,7 @@ async def disable_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def enable_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     if not await is_admin(update, context): await update.message.reply_html("❌ Admins only!"); return
-    if not context.args: await update.message.reply_html("Usage: /enable <command>"); return
+    if not context.args: await update.message.reply_html("Usage: /enable &lt;command&gt;"); return
     cmd = context.args[0].lstrip("/").lower()
     gs = await _get_group_settings(chat.id)
     disabled = [d for d in gs["disabled_cmds"] if d != cmd]
@@ -618,7 +636,7 @@ async def setgoodbye_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not args:
         await update.message.reply_html(
             "Usage: /setgoodbye on/off\n"
-            "Or: /setgoodbye <message>\n"
+            "Or: /setgoodbye &lt;message&gt;\n"
             "Use {name} for user name"
         ); return
     if args[0].lower() in ("on","off"):
@@ -666,7 +684,9 @@ async def captcha_new_member_handler(update: Update, context: ContextTypes.DEFAU
             await context.bot.restrict_chat_member(
                 chat.id, member.id, ChatPermissions(can_send_messages=False)
             )
-        except: pass
+        except Exception as e:
+            logger.debug(f"Suppressed error in advanced_admin.py: {e}")
+            pass
 
         a = random.randint(1, 9); b = random.randint(1, 9)
         answer = a + b
@@ -698,7 +718,9 @@ async def _captcha_timeout(context, cid, uid, mid, wait):
         try:
             await context.bot.ban_chat_member(cid, uid)
             await context.bot.delete_message(cid, mid)
-        except: pass
+        except Exception as e:
+            logger.debug(f"Suppressed error in advanced_admin.py: {e}")
+            pass
 
 
 async def captcha_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -713,17 +735,23 @@ async def captcha_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await context.bot.restrict_chat_member(
                 pending["chat_id"], target_uid,
-                ChatPermissions(can_send_messages=True, can_send_media_messages=True,
+                ChatPermissions(can_send_messages=True,
+                                can_send_photos=True, can_send_videos=True, can_send_audios=True,
+                                can_send_documents=True, can_send_video_notes=True, can_send_voice_notes=True,
                                 can_send_polls=True, can_send_other_messages=True,
                                 can_add_web_page_previews=True, can_invite_users=True)
             )
             await q.edit_message_text(f"✅ {mention(u)} passed the captcha! Welcome!", parse_mode="HTML")
-        except: pass
+        except Exception as e:
+            logger.debug(f"Suppressed error in advanced_admin.py: {e}")
+            pass
     else:
         try:
             await context.bot.ban_chat_member(pending["chat_id"], target_uid)
             await q.edit_message_text(f"❌ {mention(u)} failed captcha! Removed.", parse_mode="HTML")
-        except: pass
+        except Exception as e:
+            logger.debug(f"Suppressed error in advanced_admin.py: {e}")
+            pass
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -731,6 +759,14 @@ async def captcha_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ═══════════════════════════════════════════════════════════════════════
 
 async def announce_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    NOTE: This function is NOT currently registered in bot.py — the
+    active /announce command is handlers/owner_panel.py's announce_cmd
+    (imported there as owner_announce_cmd). This copy is kept only for
+    reference; it is not imported or wired up anywhere, so it cannot
+    cause a duplicate-registration conflict. Identity string fixed below
+    regardless, in case this is ever reused.
+    """
     """Owner sends announcement to ONE or ALL groups.
     Usage: /announce <group_id or all> <message>
     Example: /announce all Enjoy the new Iota bot update!
@@ -743,15 +779,15 @@ async def announce_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(args) < 2:
         await update.message.reply_html(
             "📢 <b>Owner Announce</b>\n\n"
-            "Usage: /announce all <message>\n"
-            "Or: /announce <group_id> <message>\n\n"
+            "Usage: /announce all &lt;message&gt;\n"
+            "Or: /announce &lt;group_id&gt; &lt;message&gt;\n\n"
             "Example:\n"
             "/announce all Enjoy the new Iota bot update! 🎉"
         ); return
 
     target = args[0].lower()
     message = " ".join(args[1:])
-    full_msg = f"📢 <b>Announcement from Iota Bot</b>\n\n{message}\n\n— @Boobies_00"
+    full_msg = f"📢 <b>Announcement from Iota Bot</b>\n\n{message}\n\n— @Its_iotabot"
 
     if target == "all":
         # Get all unique chat_ids from group_settings
@@ -766,7 +802,9 @@ async def announce_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await context.bot.send_message(ch["_id"], full_msg, parse_mode="HTML")
                 sent += 1
                 await asyncio.sleep(0.1)
-            except: failed += 1
+            except Exception as e:
+                logger.debug(f"Suppressed error in advanced_admin.py: {e}")
+                failed += 1
         await status.edit_text(
             f"📢 Done!\n✅ Sent: {sent}\n❌ Failed: {failed}",
             parse_mode="HTML"

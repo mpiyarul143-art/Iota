@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Iota Ludo</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<link rel="stylesheet" href="/ludo/static/css/ludo.css">
+</head>
+<body>
+  <div id="app">
+
+    <!-- ── LOBBY SCREEN ─────────────────────────────────────────── -->
+    <section id="screen-lobby" class="screen active">
+      <header class="topbar">
+        <div class="brand">🎲 Iota Ludo</div>
+        <div id="lobby-status" class="badge">Connecting…</div>
+      </header>
+
+      <div class="lobby-card">
+        <h2 id="lobby-title">Waiting for players…</h2>
+        <div id="player-slots" class="player-slots"></div>
+
+        <div class="lobby-meta">
+          <span id="bet-display">💰 Bet: 0</span>
+          <span id="player-count">0/4 players</span>
+        </div>
+
+        <div class="lobby-actions">
+          <button id="btn-join" class="btn btn-primary">🎮 Join Game</button>
+          <button id="btn-spectate" class="btn btn-ghost">👀 Watch Only</button>
+          <button id="btn-start" class="btn btn-success hidden">▶️ Start Game</button>
+        </div>
+        <p class="hint">Min 2 players to start. Host starts the game.</p>
+      </div>
+
+      <div id="lobby-spectators" class="spectator-strip"></div>
+    </section>
+
+    <!-- ── GAME SCREEN ──────────────────────────────────────────── -->
+    <section id="screen-game" class="screen">
+      <header class="topbar">
+        <div class="brand">🎲 Iota Ludo</div>
+        <div id="game-status" class="badge">—</div>
+      </header>
+
+      <div id="scoreboard" class="scoreboard"></div>
+
+      <div class="board-wrap">
+        <svg id="board" viewBox="0 0 780 780" xmlns="http://www.w3.org/2000/svg"></svg>
+      </div>
+
+      <div class="controls">
+        <div id="dice-box" class="dice-box">
+          <div id="dice-face" class="dice-face">🎲</div>
+        </div>
+        <button id="btn-roll" class="btn btn-primary btn-large">Roll Dice</button>
+        <div id="turn-indicator" class="turn-indicator">Waiting…</div>
+      </div>
+
+      <div id="piece-picker" class="piece-picker hidden"></div>
+    </section>
+
+    <!-- ── WIN SCREEN ───────────────────────────────────────────── -->
+    <section id="screen-win" class="screen">
+      <div class="win-card">
+        <div class="win-emoji">🏆</div>
+        <h1 id="win-title">Game Over!</h1>
+        <p id="win-detail"></p>
+        <button id="btn-close" class="btn btn-primary">Close</button>
+      </div>
+    </section>
+
+    <!-- ── SHARED: CHAT DRAWER ──────────────────────────────────── -->
+    <div id="chat-toggle" class="chat-toggle">💬</div>
+    <div id="chat-drawer" class="chat-drawer">
+      <div class="chat-header">
+        <span>Lobby Chat</span>
+        <span id="chat-close">✕</span>
+      </div>
+      <div id="chat-log" class="chat-log"></div>
+      <div class="chat-input-row">
+        <input id="chat-input" type="text" maxlength="200" placeholder="Say something…">
+        <button id="chat-send">➤</button>
+      </div>
+    </div>
+
+  </div>
+
+  <script src="/ludo/static/js/board.js"></script>
+  <script src="/ludo/static/js/ludo.js"></script>
+</body>
+</html>

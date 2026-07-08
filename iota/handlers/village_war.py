@@ -4,14 +4,20 @@ Commands:
   /attack, /defense, /troops, /walls, /build
   /train, /kingdom, /spy, /storage, /collect, /vault
 """
+import logging
 import random
 import asyncio
 import time
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import ContextTypes
-from utils.mongo_db import get_db, ensure_user, get_user, update_user, add_balance
+from utils.mongo_db import get_db, ensure_user, get_user, update_user, add_balance, deduct_balance
 from utils.helpers import mention, mention_id, fmt, ts
-from config import TROOP_TYPES, WALL_TYPES, DEFENSE_TYPES, GIFS, MINE_INTERVAL, CITIZEN_START
+from utils.fonts import sc
+from utils.system_gate import village_gate
+from config import (TROOP_TYPES, WALL_TYPES, DEFENSE_TYPES, MINE_INTERVAL,
+                     CITIZEN_START, MARKET_PRICES, MARKET_SELL_RATIO)
+
+logger = logging.getLogger(__name__)
 
 # ── DB helpers ────────────────────────────────────────────────────────────────
 
@@ -87,6 +93,7 @@ BUILD_COSTS = {
 #  /collect — collect all resources from mines
 # ═══════════════════════════════════════════════════════
 
+@village_gate
 async def collect_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user
     await ensure_user(u.id, u.username or "", u.full_name)
@@ -133,6 +140,7 @@ async def collect_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 #  /storage — check resources
 # ═══════════════════════════════════════════════════════
 
+@village_gate
 async def storage_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user
     await ensure_user(u.id, u.username or "", u.full_name)
@@ -152,6 +160,7 @@ async def storage_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 #  /vault — check vault + gems + rank
 # ═══════════════════════════════════════════════════════
 
+@village_gate
 async def vault_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user
     await ensure_user(u.id, u.username or "", u.full_name)
@@ -181,6 +190,7 @@ async def vault_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 #  /mines — mine levels and production
 # ═══════════════════════════════════════════════════════
 
+@village_gate
 async def mines_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user
     await ensure_user(u.id, u.username or "", u.full_name)
@@ -204,6 +214,7 @@ async def mines_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 #  /build — buildings with inline buttons
 # ═══════════════════════════════════════════════════════
 
+@village_gate
 async def build_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user; args = context.args
     await ensure_user(u.id, u.username or "", u.full_name)
@@ -235,7 +246,7 @@ async def build_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def build_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
-    parts = q.data.split("_", 2)  # build_<uid>_<building>
+    parts = q.data.split("_", 2)  # build_&lt;uid&gt;_&lt;building&gt;
     if len(parts) < 3: return
     uid = int(parts[1]); bld = parts[2]
     if q.from_user.id != uid:
@@ -316,6 +327,7 @@ async def _do_build_callback(q, context, uid, bld):
 #  /walls — build/upgrade walls
 # ═══════════════════════════════════════════════════════
 
+@village_gate
 async def walls_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user; args = context.args
     await ensure_user(u.id, u.username or "", u.full_name)
@@ -330,7 +342,7 @@ async def walls_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 text += f"🧱 {wtype.title()} Wall Lv{w.get('level',1)} — HP: {w['hp']}/{w['max_hp']}\n"
             else:
                 text += f"🔓 {wtype.title()} Wall — Not built\n"
-        text += "\nBuild: /walls <wood/stone/iron>"
+        text += "\nBuild: /walls &lt;wood/stone/iron&gt;"
         for wtype, wdata in WALL_TYPES.items():
             if wtype == "wood":   text += f"\n  /walls wood  (🪵 {wdata['cost_wood']})"
             elif wtype == "stone": text += f"\n  /walls stone (🪨 {wdata['cost_stone']})"
@@ -374,6 +386,7 @@ async def walls_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 #  /defense — build defense structures
 # ═══════════════════════════════════════════════════════
 
+@village_gate
 async def defense_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user; args = context.args
     await ensure_user(u.id, u.username or "", u.full_name)
@@ -390,7 +403,7 @@ async def defense_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 text += f"🔓 {dtype.replace('_',' ').title()} — Not built (Cost: {fmt(ddata['cost_coins'])})\n"
         text += f"\n💰 Your Balance: {fmt(d['balance'])}"
-        text += "\nBuild: /defense <archer_tower/cannon>"
+        text += "\nBuild: /defense &lt;archer_tower/cannon&gt;"
         await update.message.reply_html(text); return
 
     dtype = args[0].lower()
@@ -414,11 +427,7 @@ async def defense_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         defs[dtype] = {"level":1,"hp":ddata["hp"],"max_hp":ddata["hp"],"damage":ddata["damage"]}
         action = f"built! HP:{ddata['hp']} DMG:{ddata['damage']}"
 
-    await get_user.__self__ if False else None
-    from utils.mongo_db import update_user as _upd_user
-    await _upd_user(uid=u.id, **{})  # dummy
-    from utils.mongo_db import get_db as _gdb
-    await _gdb().users.update_one({"_id": u.id}, {"$inc": {"balance": -cost}})
+    await add_balance(u.id, -cost)
     await _upd(u.id, defense=defs)
     await update.message.reply_html(
         f"🛡️ <b>{dtype.replace('_',' ').title()}</b> {action}!\n💰 -{fmt(cost)}"
@@ -429,6 +438,7 @@ async def defense_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 #  /train — train troops/workers
 # ═══════════════════════════════════════════════════════
 
+@village_gate
 async def train_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user; args = context.args
     await ensure_user(u.id, u.username or "", u.full_name)
@@ -442,16 +452,18 @@ async def train_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Train troops:\n"
         )
         for ttype, tdata in TROOP_TYPES.items():
-            text += f"/train {ttype} <n>  — {fmt(tdata['cost_coins'])} each\n"
-        text += "\n/train workers <n>  — Speeds up construction"
+            text += f"/train {ttype} &lt;n&gt;  — {fmt(tdata['cost_coins'])} each\n"
+        text += "\n/train workers &lt;n&gt;  — Speeds up construction"
         await update.message.reply_html(text); return
 
     if len(args) < 2:
-        await update.message.reply_html("❌ Usage: /train <troop_type> <count>"); return
+        await update.message.reply_html("❌ Usage: /train &lt;troop_type&gt; &lt;count&gt;"); return
 
     ttype = args[0].lower()
     try: count = int(args[1])
-    except: await update.message.reply_html("❌ Invalid count!"); return
+    except Exception as e:
+        logger.debug(f"Suppressed error in village_war.py: {e}")
+        await update.message.reply_html("❌ Invalid count!"); return
     if count <= 0: await update.message.reply_html("❌ Count must be positive!"); return
 
     troops = v.get("troops", {})
@@ -493,8 +505,7 @@ async def train_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ); return
 
     troops[ttype] = troops.get(ttype, 0) + count
-    from utils.mongo_db import get_db as _gdb2
-    await _gdb2().users.update_one({"_id": u.id}, {"$inc": {"balance": -cost}})
+    await add_balance(u.id, -cost)
     await _upd(u.id, troops=troops)
 
     await update.message.reply_html(
@@ -508,6 +519,7 @@ async def train_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 #  /troops — show your army
 # ═══════════════════════════════════════════════════════
 
+@village_gate
 async def troops_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user
     await ensure_user(u.id, u.username or "", u.full_name)
@@ -543,6 +555,7 @@ async def troops_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 #  /kingdom — spy on target's kingdom
 # ═══════════════════════════════════════════════════════
 
+@village_gate
 async def kingdom_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message; u = update.effective_user
     await ensure_user(u.id, u.username or "", u.full_name)
@@ -590,7 +603,7 @@ async def kingdom_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"  ⚙️ {loot_iron} Iron\n\n"
         f"🧱 <b>Walls:</b>\n{wall_text}\n\n"
         f"🛡️ <b>Defense:</b>\n{def_text}\n\n"
-        f"⚔️ Attack: /attack warriors <n> (reply to them)"
+        f"⚔️ Attack: /attack warriors &lt;n&gt; (reply to them)"
     )
 
 
@@ -598,6 +611,7 @@ async def kingdom_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 #  /spy — check user's available loot (quick)
 # ═══════════════════════════════════════════════════════
 
+@village_gate
 async def spy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message; u = update.effective_user
     if not msg.reply_to_message or not msg.reply_to_message.from_user:
@@ -619,6 +633,7 @@ async def spy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 #  /attack — MAIN WAR COMMAND
 # ═══════════════════════════════════════════════════════
 
+@village_gate
 async def attack_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message; u = update.effective_user; now = ts()
     await ensure_user(u.id, u.username or "", u.full_name)
@@ -626,7 +641,7 @@ async def attack_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not msg.reply_to_message or not msg.reply_to_message.from_user:
         await msg.reply_html(
             "⚔️ <b>Attack!</b>\n\n"
-            "Usage: Reply to target + /attack <troop_type> <count>\n"
+            "Usage: Reply to target + /attack &lt;troop_type&gt; &lt;count&gt;\n"
             "Example: /attack warriors 20\n\n"
             "Scout first with /kingdom"
         ); return
@@ -639,17 +654,19 @@ async def attack_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     args = context.args
     if len(args) < 2:
-        await msg.reply_html("❌ Usage: /attack <troop_type> <count>"); return
+        await msg.reply_html("❌ Usage: /attack &lt;troop_type&gt; &lt;count&gt;"); return
 
     ttype = args[0].lower()
     try: count = int(args[1])
-    except: await msg.reply_html("❌ Invalid count!"); return
+    except Exception as e:
+        logger.debug(f"Suppressed error in village_war.py: {e}")
+        await msg.reply_html("❌ Invalid count!"); return
     if count <= 0: await msg.reply_html("❌ Count must be positive!"); return
 
     # Attacker village
     av = await _get_village(u.id)
     if ttype not in av.get("troops", {}):
-        await msg.reply_html(f"❌ You don't have {ttype}! Train them: /train {ttype} <n>"); return
+        await msg.reply_html(f"❌ You don't have {ttype}! Train them: /train {ttype} &lt;n&gt;"); return
     if av["troops"].get(ttype, 0) < count:
         await msg.reply_html(
             f"❌ You only have {av['troops'].get(ttype,0)} {ttype}!"
@@ -666,9 +683,14 @@ async def attack_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Protection check
     if dv.get("protected_until", 0) > now:
-        rem = dv["protected_until"] - now
+        # 🔴 PRIVACY FIX: this used to show the exact remaining time
+        # ("protected for 23h 57m") to the attacker directly in the
+        # group — the same leak as the old /bal bug, just in the war
+        # system. An attacker doesn't need the exact countdown to know
+        # they can't attack right now; showing it just makes it trivial
+        # to time a raid for the exact second protection expires.
         await msg.reply_html(
-            f"🛡️ {mention(target)} is protected for <b>{rem//3600}h {(rem%3600)//60}m</b>!"
+            f"🛡️ {mention(target)} is currently protected — you can't attack them right now!"
         ); return
 
     # ── War simulation ────────────────────────────────────────────────
@@ -694,6 +716,15 @@ async def attack_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rounds += 1
 
     attacker_wins = atk_hp > 0
+
+    # 🆕 Additive-only raid log for /raidlog — records the outcome for
+    # both users' history. This never affects the combat result above
+    # (already computed) or any resource/troop transfer below.
+    try:
+        from utils.mongo_db import log_raid
+        await log_raid(u.id, target.id, attacker_wins)
+    except Exception as e:
+        logger.debug(f"attack_cmd: log_raid failed: {e}")
 
     # Update attacker troops (lose some regardless)
     troops_lost = min(count, max(1, int(count * (total_def_dmg / max(total_troop_hp, 1)))))
@@ -728,12 +759,20 @@ async def attack_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"💀 Troops lost: {troops_lost} {ttype}\n"
             f"🛡️ {mention(target)} gets 1hr protection"
         )
-        gif = GIFS.get("attack_win")
+        gif = None
         try:
-            await context.bot.send_animation(
-                msg.chat_id, animation=gif, caption=result, parse_mode="HTML"
-            )
-        except Exception:
+            from utils.gif_provider import get_gif_for_mood
+            gif = await get_gif_for_mood("attack_win")
+        except Exception as e:
+            logger.debug(f"attack_cmd: live GIF fetch failed: {e}")
+        if gif:
+            try:
+                await context.bot.send_animation(
+                    msg.chat_id, animation=gif, caption=result, parse_mode="HTML"
+                )
+            except Exception:
+                await msg.reply_html(result)
+        else:
             await msg.reply_html(result)
 
         # Notify defender
@@ -763,6 +802,7 @@ async def attack_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 #  /emperors — top vault holders
 # ═══════════════════════════════════════════════════════
 
+@village_gate
 async def emperors_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pipeline = [
         {"$addFields": {"total": {"$add": ["$vault", "$treasury"]}}},
@@ -788,6 +828,7 @@ async def emperors_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 #  /settle — move coins between vault and treasury
 # ═══════════════════════════════════════════════════════
 
+@village_gate
 async def settle_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user; args = context.args
     await ensure_user(u.id, u.username or "", u.full_name)
@@ -797,12 +838,14 @@ async def settle_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🏦 <b>Settle — {mention(u)}</b>\n\n"
             f"🪙 Treasury: {fmt(v['treasury'])}\n"
             f"🏛️ Vault: {fmt(v['vault'])}\n\n"
-            "/settle vault <amount> — Treasury→Vault\n"
-            "/settle treasury <amount> — Vault→Treasury"
+            "/settle vault &lt;amount&gt; — Treasury→Vault\n"
+            "/settle treasury &lt;amount&gt; — Vault→Treasury"
         ); return
     direction = args[0].lower()
     try: amt = int(args[1])
-    except: await update.message.reply_html("❌ Invalid amount!"); return
+    except Exception as e:
+        logger.debug(f"Suppressed error in village_war.py: {e}")
+        await update.message.reply_html("❌ Invalid amount!"); return
     if amt <= 0: await update.message.reply_html("❌ Amount must be positive!"); return
     if direction == "vault":
         if v["treasury"] < amt: await update.message.reply_html("❌ Not enough in treasury!"); return
@@ -813,13 +856,14 @@ async def settle_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _upd(u.id, vault=v["vault"]-amt, treasury=v["treasury"]+amt)
         await update.message.reply_html(f"✅ Moved {fmt(amt)} → Treasury!")
     else:
-        await update.message.reply_html("❌ Use: /settle vault/treasury <amount>")
+        await update.message.reply_html("❌ Use: /settle vault/treasury &lt;amount&gt;")
 
 
 # ═══════════════════════════════════════════════════════
 #  /convert — resources to coins
 # ═══════════════════════════════════════════════════════
 
+@village_gate
 async def convert_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user; args = context.args
     await ensure_user(u.id, u.username or "", u.full_name)
@@ -831,13 +875,15 @@ async def convert_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🪵 Wood: {v['wood']}  (rate: {RATES['wood']} coins each)\n"
             f"🪨 Stone: {v['stone']}  (rate: {RATES['stone']} coins each)\n"
             f"⚙️ Iron: {v['iron']}  (rate: {RATES['iron']} coins each)\n\n"
-            "Usage: /convert <wood/stone/iron> <amount>\n"
+            "Usage: /convert &lt;wood/stone/iron&gt; &lt;amount&gt;\n"
             "Note: Cannot convert back to resources!"
         ); return
     res = args[0].lower()
     if res not in RATES: await update.message.reply_html("❌ Use: wood / stone / iron"); return
     try: amt = int(args[1])
-    except: await update.message.reply_html("❌ Invalid amount!"); return
+    except Exception as e:
+        logger.debug(f"Suppressed error in village_war.py: {e}")
+        await update.message.reply_html("❌ Invalid amount!"); return
     stock = {"wood":v["wood"],"stone":v["stone"],"iron":v["iron"]}[res]
     if stock < amt: await update.message.reply_html(f"❌ Only have {stock} {res}!"); return
     coins = amt * RATES[res]
@@ -869,10 +915,149 @@ async def guide_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /settle vault 1000 — Move to vault\n"
         "• /convert wood 200 — Resources → Coins\n"
         "• /vault — Check your rank\n\n"
-        "👑 /emperors — Global leaderboard\n\n"
+        "👑 /emperors — Global leaderboard\n"
+        "🏘️ /village — Full empire dashboard (one command, everything)\n\n"
         "💡 <b>Tips:</b>\n"
         "• Upgrade Home first (more citizens!)\n"
         "• Always have walls before attacking\n"
         "• Scout with /kingdom before attack\n"
         "• Keep coins in vault for leaderboard"
     )
+
+
+# ═══════════════════════════════════════════════════════
+#  /village — full empire dashboard (new, professional overview)
+# ═══════════════════════════════════════════════════════
+
+@village_gate
+async def village_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    One-stop empire overview: resources, currency, citizens, army, walls,
+    and defense all in a single glance — instead of needing to run
+    /storage, /vault, /troops and /walls separately every time.
+    """
+    u = update.effective_user
+    await ensure_user(u.id, u.username or "", u.full_name)
+    v = await _get_village(u.id)
+    d = await get_user(u.id)
+    now = ts()
+
+    troops = v.get("troops", {})
+    total_troops = sum(troops.values())
+    walls = v.get("walls", {})
+    defs = v.get("defense", {})
+    active_citizens = max(0, v["max_citizens"] - total_troops - v.get("workers", 0))
+
+    elapsed = now - v.get("last_mine", now)
+    collect_ready = elapsed >= 300
+    prot = v.get("protected_until", 0) > now
+
+    wall_summary = ", ".join(
+        f"{wt.title()} Lv{w['level']}" for wt, w in walls.items()
+    ) or "None built"
+    def_summary = ", ".join(
+        f"{dt.replace('_',' ').title()} Lv{df['level']}" for dt, df in defs.items()
+    ) or "None built"
+    troop_summary = ", ".join(
+        f"{count}× {ttype.title()}" for ttype, count in troops.items() if count > 0
+    ) or "No troops trained"
+
+    await update.message.reply_html(
+        f"🏰 <b>Empire Dashboard — {mention(u)}</b>\n"
+        f"🏘️ Stage: <b>{v['stage'].title()}</b>  |  Kingdom Lv<b>{v['kingdom_level']}</b>\n"
+        f"{'🛡️ <b>Protected</b>' if prot else '⚠️ No active protection'}\n"
+        f"═══════════════════\n\n"
+        f"📦 <b>Resources</b> (cap {v['storage_cap']})\n"
+        f"🪵 {v['wood']}  🪨 {v['stone']}  ⚙️ {v['iron']}\n"
+        f"⛏️ Collect: {'✅ Ready!' if collect_ready else '⏳ Cooling down'}\n\n"
+        f"💰 <b>Currency</b>\n"
+        f"🪙 Treasury: {fmt(v['treasury'])}  |  🏛️ Vault: {fmt(v['vault'])}\n"
+        f"💎 Gems: {d.get('gems',0)}\n\n"
+        f"👥 <b>Citizens</b> ({v['max_citizens']} total)\n"
+        f"🧑 Free: {active_citizens}  👷 Workers: {v.get('workers',0)}  ⚔️ Troops: {total_troops}\n\n"
+        f"⚔️ <b>Army:</b> {troop_summary}\n\n"
+        f"🧱 <b>Walls:</b> {wall_summary}\n"
+        f"🛡️ <b>Defense:</b> {def_summary}\n\n"
+        f"🏗️ Buildings: Home Lv{v['home_level']} • Camp Lv{v['camp_level']} • Hut Lv{v['hut_level']}\n\n"
+        f"📖 Full command list: /guide"
+    )
+
+
+# ── /market ──────────────────────────────────────────────────────────────────
+@village_gate
+async def market_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Village market — spend coins on resources, or sell resources for coins.
+      /market                → show prices + current stock
+      /market buy  wood 100  → spend coins, gain 100 wood
+      /market sell iron 50   → lose 50 iron, gain coins
+    """
+    u = update.effective_user
+    await ensure_user(u.id, u.username or "", u.full_name)
+    v = await _get_village(u.id)
+    d = await get_user(u.id)
+    cap = v["storage_cap"]
+
+    if not context.args or context.args[0].lower() in ("prices", "show", "shop"):
+        lines = "\n".join(
+            f"  {r.title()}: {sc('buy')} {fmt(MARKET_PRICES[r])}/u  |  "
+            f"{sc('sell')} {fmt(int(MARKET_PRICES[r]*MARKET_SELL_RATIO))}/u"
+            for r in MARKET_PRICES
+        )
+        await update.message.reply_html(
+            f"🏪 <b>{sc('Village Market')}</b>\n\n"
+            f"{lines}\n\n"
+            f"🪵 Wood:  <b>{v['wood']}</b> / {cap}\n"
+            f"🪨 Stone: <b>{v['stone']}</b> / {cap}\n"
+            f"⚙️ Iron:  <b>{v['iron']}</b> / {cap}\n"
+            f"💰 {sc('Coins')}: <b>{fmt(d['balance'])}</b>\n\n"
+            f"{sc('Usage')}: /market buy &lt;wood|stone|iron&gt; &lt;qty&gt;"
+        ); return
+
+    action = context.args[0].lower()
+    if action not in ("buy", "sell") or len(context.args) < 3:
+        await update.message.reply_html(
+            f"❌ {sc('Usage')}: /market buy &lt;wood|stone|iron&gt; &lt;qty&gt;"
+        ); return
+
+    res = context.args[1].lower()
+    if res not in MARKET_PRICES:
+        await update.message.reply_html(
+            f"❌ {sc('Unknown resource')}! {sc('Use')}: wood | stone | iron"
+        ); return
+    try:
+        qty = int(context.args[2])
+    except ValueError:
+        await update.message.reply_html("❌ Quantity must be a whole number!"); return
+    if qty <= 0:
+        await update.message.reply_html("❌ Quantity must be positive!"); return
+
+    if action == "buy":
+        cost = qty * MARKET_PRICES[res]
+        if d["balance"] < cost:
+            await update.message.reply_html(
+                f"❌ {sc('Need')} {fmt(cost)} {sc('coins, you have')} {fmt(d['balance'])}"
+            ); return
+        new_amt = v[res] + qty
+        if new_amt > cap:
+            await update.message.reply_html(
+                f"❌ {sc('Storage full')}! {sc('Max')} {cap}, {sc('you have')} {v[res]}"
+            ); return
+        await deduct_balance(u.id, cost)
+        await _upd(u.id, **{res: new_amt})
+        await update.message.reply_html(
+            f"🛒 {mention(u)} {sc('Bought')} {qty} {res}!\n"
+            f"💰 -{fmt(cost)}  |  {res.title()}: <b>{new_amt}</b> / {cap}"
+        )
+    else:  # sell
+        if v[res] < qty:
+            await update.message.reply_html(
+                f"❌ {sc('Not enough')} {res}! {sc('You have')} {v[res]}"
+            ); return
+        gain = int(qty * MARKET_PRICES[res] * MARKET_SELL_RATIO)
+        await _upd(u.id, **{res: v[res] - qty})
+        await add_balance(u.id, gain)
+        await update.message.reply_html(
+            f"💱 {mention(u)} {sc('Sold')} {qty} {res}!\n"
+            f"💰 +{fmt(gain)}  |  {res.title()}: <b>{v[res] - qty}</b> / {cap}"
+        )

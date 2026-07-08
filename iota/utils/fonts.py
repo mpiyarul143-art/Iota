@@ -1,18 +1,37 @@
 """
-Iota Font System - Baka-style smallcaps/unicode fonts
+Iota Font System - Iota-style smallcaps/unicode fonts
 """
 
-# Smallcaps alphabet (like Baka bot)
+# Smallcaps alphabet (Iota style)
 _SC = {
     'a':'ᴀ','b':'ʙ','c':'ᴄ','d':'ᴅ','e':'ᴇ','f':'ꜰ','g':'ɢ','h':'ʜ',
     'i':'ɪ','j':'ᴊ','k':'ᴋ','l':'ʟ','m':'ᴍ','n':'ɴ','o':'ᴏ','p':'ᴘ',
-    'q':'Q','r':'ʀ','s':'ꜱ','t':'ᴛ','u':'ᴜ','v':'ᴠ','w':'ᴡ','x':'x',
+    'q':'ǫ','r':'ʀ','s':'ꜱ','t':'ᴛ','u':'ᴜ','v':'ᴠ','w':'ᴡ','x':'x',
     'y':'ʏ','z':'ᴢ'
 }
 
 def sc(text: str) -> str:
-    """Convert text to smallcaps like Baka bot."""
-    return ''.join(_SC.get(c.lower(), c) for c in text)
+    """
+    Convert text to Iota-style smallcaps — matching the exact visual
+    style used by other bots (e.g. "𝐁ᴀᴋᴀ" / "Aʟʟ Eᴄᴏɴᴏᴍʏ Cᴏᴍᴍᴀɴᴅꜱ"):
+    the FIRST letter of each word stays a normal, full-size capital,
+    and every letter after it becomes a small-caps glyph. Previously
+    this converted every single letter uniformly (including the first
+    letter of each word), which didn't match that look at all — every
+    word came out looking fully lowercase-small-caps instead of having
+    that bold-capital-then-small-caps punch.
+    Non-letter characters (spaces, punctuation, digits, emoji, HTML)
+    pass through completely untouched.
+    """
+    words = text.split(" ")
+    out = []
+    for w in words:
+        if not w:
+            out.append(w)
+            continue
+        first, rest = w[0], w[1:]
+        out.append(first + "".join(_SC.get(c.lower(), c) for c in rest))
+    return " ".join(out)
 
 def bold_sc(text: str) -> str:
     """Smallcaps wrapped in HTML bold."""

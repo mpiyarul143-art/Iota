@@ -1,6 +1,6 @@
 """
-Iota Group Protection System
-━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Iota Group Protection System — MongoDB-backed
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Auto-detects and handles:
   • Spam floods (too many messages from one user)
   • Arabic/foreign script spam
@@ -13,138 +13,26 @@ Auto-detects and handles:
   • Anti-raid (mass join flood)
 """
 
-import re, time
+import re
 from collections import defaultdict
 from telegram import Update, ChatPermissions, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import ContextTypes
 from telegram.error import TelegramError
-from utils.db import get_conn, ensure_user
+from utils.mongo_db import (
+    ensure_user, get_prot, update_prot, add_report, get_reports,
+    get_report_count, get_bad_words, add_bad_word, remove_bad_word
+)
 from utils.helpers import mention, ts, is_admin
+from utils.safe_html import safe_html
 
-# ── DB setup ──────────────────────────────────────────────────────────────────
-
-def _ensure_tables():
-    c = get_conn()
-    c.executescript("""
-    CREATE TABLE IF NOT EXISTS group_protection (
-        chat_id             INTEGER PRIMARY KEY,
-        enabled             INTEGER DEFAULT 1,
-        anti_spam           INTEGER DEFAULT 1,
-        anti_link           INTEGER DEFAULT 1,
-        anti_arabic         INTEGER DEFAULT 0,
-        anti_forward        INTEGER DEFAULT 0,
-        anti_bot            INTEGER DEFAULT 1,
-        anti_flood          INTEGER DEFAULT 1,
-        flood_limit         INTEGER DEFAULT 5,
-        flood_window        INTEGER DEFAULT 5,
-        anti_raid           INTEGER DEFAULT 1,
-        raid_threshold      INTEGER DEFAULT 10,
-        raid_window         INTEGER DEFAULT 30,
-        profanity_filter    INTEGER DEFAULT 0,
-        log_channel         INTEGER DEFAULT 0
-    );
-
-    CREATE TABLE IF NOT EXISTS reports (
-        id          INTEGER PRIMARY KEY AUTOINCREMENT,
-        chat_id     INTEGER,
-        reporter_id INTEGER,
-        reported_id INTEGER,
-        reason      TEXT    DEFAULT '',
-        msg_text    TEXT    DEFAULT '',
-        status      TEXT    DEFAULT 'pending',
-        created_at  INTEGER DEFAULT 0
-    );
-
-    CREATE TABLE IF NOT EXISTS whitelisted_links (
-        chat_id     INTEGER,
-        domain      TEXT,
-        PRIMARY KEY (chat_id, domain)
-    );
-
-    CREATE TABLE IF NOT EXISTS bad_words (
-        chat_id     INTEGER,
-        word        TEXT,
-        PRIMARY KEY (chat_id, word)
-    );
-    """)
-    c.commit()
-
-_ensure_tables()
-
-# ── Runtime flood tracking ────────────────────────────────────────────────────
+# ── Runtime flood tracking (in-memory, per-process) ───────────────────────────
 # {chat_id: {user_id: [timestamps]}}
 _flood_data: dict = defaultdict(lambda: defaultdict(list))
 _raid_data:  dict = defaultdict(list)   # {chat_id: [join_timestamps]}
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
-def get_prot(chat_id: int) -> dict:
-    row = get_conn().execute(
-        "SELECT * FROM group_protection WHERE chat_id=?", (chat_id,)
-    ).fetchone()
-    if row:
-        return dict(row)
-    # Insert defaults
-    get_conn().execute(
-        "INSERT OR IGNORE INTO group_protection (chat_id) VALUES(?)", (chat_id,)
-    )
-    get_conn().commit()
-    return get_prot(chat_id)
-
-def update_prot(chat_id: int, **kw):
-    if not kw: return
-    c = get_conn()
-    c.execute(
-        f"UPDATE group_protection SET {','.join(f'{k}=?' for k in kw)} WHERE chat_id=?",
-        list(kw.values()) + [chat_id]
-    )
-    c.commit()
-    # Make sure row exists
-    get_conn().execute("INSERT OR IGNORE INTO group_protection(chat_id) VALUES(?)", (chat_id,))
-    get_conn().commit()
-
-def add_report(chat_id, reporter_id, reported_id, reason, msg_text=""):
-    c = get_conn()
-    c.execute(
-        "INSERT INTO reports(chat_id,reporter_id,reported_id,reason,msg_text,status,created_at) VALUES(?,?,?,?,?,'pending',?)",
-        (chat_id, reporter_id, reported_id, reason, msg_text, ts())
-    )
-    c.commit()
-
-def get_reports(chat_id, status="pending"):
-    return get_conn().execute(
-        "SELECT * FROM reports WHERE chat_id=? AND status=? ORDER BY created_at DESC",
-        (chat_id, status)
-    ).fetchall()
-
-def get_report_count(chat_id):
-    r = get_conn().execute(
-        "SELECT COUNT(*) as c FROM reports WHERE chat_id=? AND status='pending'", (chat_id,)
-    ).fetchone()
-    return r["c"]
-
-def resolve_report(report_id, status="resolved"):
-    c = get_conn()
-    c.execute("UPDATE reports SET status=? WHERE id=?", (status, report_id))
-    c.commit()
-
-def get_bad_words(chat_id):
-    return [r["word"] for r in get_conn().execute(
-        "SELECT word FROM bad_words WHERE chat_id=?", (chat_id,)
-    ).fetchall()]
-
-def add_bad_word(chat_id, word):
-    c = get_conn()
-    c.execute("INSERT OR IGNORE INTO bad_words(chat_id,word) VALUES(?,?)", (chat_id, word.lower()))
-    c.commit()
-
-def remove_bad_word(chat_id, word):
-    c = get_conn()
-    c.execute("DELETE FROM bad_words WHERE chat_id=? AND word=?", (chat_id, word.lower()))
-    c.commit()
-
-LINK_PATTERN  = re.compile(r'(https?://|t\.me/|@\w{5,})', re.IGNORECASE)
+LINK_PATTERN   = re.compile(r'(https?://|t\.me/|@\w{5,})', re.IGNORECASE)
 ARABIC_PATTERN = re.compile(r'[\u0600-\u06FF\u0750-\u077F]{5,}')
+
 
 async def _mute_user(bot, chat_id, user_id, seconds=300):
     try:
@@ -158,11 +46,13 @@ async def _mute_user(bot, chat_id, user_id, seconds=300):
     except TelegramError:
         pass
 
+
 async def _ban_user(bot, chat_id, user_id):
     try:
         await bot.ban_chat_member(chat_id, user_id)
     except TelegramError:
         pass
+
 
 async def _delete_msg(msg):
     try:
@@ -170,12 +60,15 @@ async def _delete_msg(msg):
     except Exception:
         pass
 
+
 async def _log(bot, log_channel, text):
-    if not log_channel: return
+    if not log_channel:
+        return
     try:
         await bot.send_message(log_channel, text, parse_mode="HTML")
     except Exception:
         pass
+
 
 # ── Main protection message handler ──────────────────────────────────────────
 
@@ -187,23 +80,22 @@ async def protection_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not msg or not u or chat.type == "private":
         return
 
-    # Skip admins/bots
     if u.is_bot:
         return
     if await is_admin(update, context, u.id):
         return
 
-    prot = get_prot(chat.id)
-    if not prot["enabled"]:
+    prot = await get_prot(chat.id)
+    if not prot.get("enabled", True):
         return
 
     text = msg.text or msg.caption or ""
     now  = ts()
 
     # ── Anti-flood ────────────────────────────────────────────────────────────
-    if prot["anti_flood"]:
-        window = prot["flood_window"]
-        limit  = prot["flood_limit"]
+    if prot.get("anti_flood", True):
+        window = prot.get("flood_window", 5)
+        limit  = prot.get("flood_limit", 5)
         times  = _flood_data[chat.id][u.id]
         times  = [t for t in times if now - t < window]
         times.append(now)
@@ -211,25 +103,41 @@ async def protection_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
         if len(times) > limit:
             await _delete_msg(msg)
-            await _mute_user(context.bot, chat.id, u.id, 300)
+            block_seconds = 900  # 15 minutes, matching Baka
+            await _mute_user(context.bot, chat.id, u.id, block_seconds)
             try:
+                from utils.fonts import sc as _sc
                 warn = await context.bot.send_message(
                     chat.id,
-                    f"⚡ {mention(u)} muted for <b>5 min</b> — flood detected!",
+                    f"⛔ {_sc('Spam Detected!')} {mention(u)} "
+                    f"{_sc('You Are Blocked For 15 Minutes.')}",
                     parse_mode="HTML"
                 )
-                context.job_queue.run_once(
-                    lambda c: c.bot.delete_message(chat.id, warn.message_id),
-                    10
-                )
+                # DM the spammer — exact Baka-style message
+                try:
+                    import time as _time
+                    from utils.mongo_db import set_spam_block
+                    await set_spam_block(u.id, _time.time() + block_seconds)
+                    await context.bot.send_message(
+                        u.id,
+                        "⛔ Yᴏᴜ ʜᴀᴠᴇ ʙᴇᴇɴ ʙʟᴏᴄᴋᴇᴅ ꜰʀᴏᴍ ᴜsɪɴɢ Iᴏᴛᴀ ꜰᴏʀ "
+                        "15 ᴍɪɴᴜᴛᴇs ᴅᴜᴇ ᴛᴏ sᴘᴀᴍᴍɪɴɢ. Pʟᴇᴀsᴇ sʟᴏᴡ ᴅᴏᴡɴ."
+                    )
+                except Exception:
+                    pass  # user may have blocked the bot — that's fine
+                if context.job_queue:
+                    context.job_queue.run_once(
+                        lambda c: c.bot.delete_message(chat.id, warn.message_id),
+                        10
+                    )
             except Exception:
                 pass
-            await _log(context.bot, prot["log_channel"],
-                       f"⚡ Flood | {u.id} | {chat.title}")
+            await _log(context.bot, prot.get("log_channel", 0),
+                       f"⛔ Spam | {u.id} | {chat.title}")
             return
 
     # ── Anti-link ─────────────────────────────────────────────────────────────
-    if prot["anti_link"] and text:
+    if prot.get("anti_link", True) and text:
         if LINK_PATTERN.search(text):
             await _delete_msg(msg)
             await _mute_user(context.bot, chat.id, u.id, 180)
@@ -241,12 +149,12 @@ async def protection_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 )
             except Exception:
                 pass
-            await _log(context.bot, prot["log_channel"],
+            await _log(context.bot, prot.get("log_channel", 0),
                        f"🔗 Link spam | {u.id} | {chat.title}")
             return
 
     # ── Anti-Arabic/foreign ───────────────────────────────────────────────────
-    if prot["anti_arabic"] and text:
+    if prot.get("anti_arabic", False) and text:
         if ARABIC_PATTERN.search(text):
             await _delete_msg(msg)
             try:
@@ -260,7 +168,7 @@ async def protection_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
     # ── Anti-forward ──────────────────────────────────────────────────────────
-    if prot["anti_forward"] and msg.forward_origin:
+    if prot.get("anti_forward", False) and msg.forward_origin:
         await _delete_msg(msg)
         try:
             await context.bot.send_message(
@@ -273,8 +181,8 @@ async def protection_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     # ── Profanity filter ──────────────────────────────────────────────────────
-    if prot["profanity_filter"] and text:
-        bad_words = get_bad_words(chat.id)
+    if prot.get("profanity_filter", False) and text:
+        bad_words = await get_bad_words(chat.id)
         for bw in bad_words:
             if bw in text.lower():
                 await _delete_msg(msg)
@@ -298,13 +206,13 @@ async def anti_raid_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not msg or not msg.new_chat_members:
         return
 
-    prot = get_prot(chat.id)
-    if not prot["enabled"] or not prot["anti_raid"]:
+    prot = await get_prot(chat.id)
+    if not prot.get("enabled", True) or not prot.get("anti_raid", True):
         return
 
-    now     = ts()
-    window  = prot["raid_window"]
-    thresh  = prot["raid_threshold"]
+    now    = ts()
+    window = prot.get("raid_window", 30)
+    thresh = prot.get("raid_threshold", 10)
 
     joins = _raid_data[chat.id]
     joins = [t for t in joins if now - t < window]
@@ -312,7 +220,6 @@ async def anti_raid_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _raid_data[chat.id] = joins
 
     if len(joins) >= thresh:
-        # Enable slow mode
         try:
             await context.bot.set_chat_slow_mode_delay(chat.id, 60)
             await context.bot.send_message(
@@ -325,7 +232,7 @@ async def anti_raid_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         except Exception:
             pass
-        await _log(context.bot, prot["log_channel"],
+        await _log(context.bot, prot.get("log_channel", 0),
                    f"🚨 Raid detected | {chat.title} | {len(joins)} joins in {window}s")
 
 
@@ -337,8 +244,8 @@ async def anti_bot_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not msg or not msg.new_chat_members:
         return
 
-    prot = get_prot(chat.id)
-    if not prot["enabled"] or not prot["anti_bot"]:
+    prot = await get_prot(chat.id)
+    if not prot.get("enabled", True) or not prot.get("anti_bot", True):
         return
 
     for member in msg.new_chat_members:
@@ -364,7 +271,7 @@ async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if chat.type == "private":
         await msg.reply_html("🚫 Use in a group!"); return
 
-    ensure_user(u.id, u.username or "", u.full_name)
+    await ensure_user(u.id, u.username or "", u.full_name)
 
     if not msg.reply_to_message or not msg.reply_to_message.from_user:
         await msg.reply_html(
@@ -381,11 +288,10 @@ async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reason   = " ".join(context.args) if context.args else "No reason provided"
     msg_text = msg.reply_to_message.text or ""
 
-    add_report(chat.id, u.id, reported.id, reason, msg_text[:200])
+    await add_report(chat.id, u.id, reported.id, reason, msg_text[:200])
 
-    report_count = get_report_count(chat.id)
+    report_count = await get_report_count(chat.id)
 
-    # Notify admins
     try:
         admins = await context.bot.get_chat_administrators(chat.id)
         admin_mentions = " ".join(
@@ -407,7 +313,7 @@ async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"👮 Admins: {admin_mentions}",
             reply_markup=kb
         )
-    except Exception as e:
+    except Exception:
         await msg.reply_html(f"✅ Report submitted! Pending reports: {report_count}")
 
 
@@ -456,17 +362,17 @@ async def reports_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_admin(update, context):
         await update.message.reply_html("❌ Admins only!"); return
 
-    pending  = get_reports(chat.id, "pending")
-    resolved = get_reports(chat.id, "resolved")
+    pending  = await get_reports(chat.id, "pending")
+    resolved = await get_reports(chat.id, "resolved")
 
     if not pending:
         await update.message.reply_html(
-            f"📊 <b>Reports — {chat.title}</b>\n\n"
+            f"📊 <b>Reports — {safe_html(chat.title)}</b>\n\n"
             f"✅ No pending reports!\n"
             f"Total resolved: {len(resolved)}"
         ); return
 
-    text = f"📊 <b>Pending Reports — {chat.title}</b>\n\n"
+    text = f"📊 <b>Pending Reports — {safe_html(chat.title)}</b>\n\n"
     for i, r in enumerate(pending[:10], 1):
         try:
             rep_user = await context.bot.get_chat(r["reporter_id"])
@@ -499,11 +405,12 @@ async def prot_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_html("❌ Admins only!"); return
 
     args = context.args
+    prot = await get_prot(chat.id)
+
     if not args:
-        prot = get_prot(chat.id)
         def _s(v): return "✅" if v else "❌"
         await update.message.reply_html(
-            f"🛡️ <b>Protection Settings — {chat.title}</b>\n\n"
+            f"🛡️ <b>Protection Settings — {safe_html(chat.title)}</b>\n\n"
             f"{_s(prot['enabled'])} Overall: <b>{'ON' if prot['enabled'] else 'OFF'}</b>\n"
             f"{_s(prot['anti_flood'])} Anti-Flood (limit: {prot['flood_limit']}/{prot['flood_window']}s)\n"
             f"{_s(prot['anti_spam'])} Anti-Spam\n"
@@ -522,47 +429,49 @@ async def prot_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/prot bot on/off\n"
             "/prot raid on/off\n"
             "/prot profanity on/off\n"
-            "/prot flood limit <number>\n"
-            "/prot setlog <channel_id>"
+            "/prot flood limit &lt;number&gt;\n"
+            "/prot setlog &lt;channel_id&gt;"
         ); return
 
-    cmd = args[0].lower()
+    cmd     = args[0].lower()
     val_str = args[1].lower() if len(args) > 1 else "on"
-    val     = 1 if val_str == "on" else 0
+    val     = val_str == "on"
 
     mapping = {
-        "on":        lambda: update_prot(chat.id, enabled=1),
-        "off":       lambda: update_prot(chat.id, enabled=0),
-        "flood":     lambda: update_prot(chat.id, anti_flood=val),
-        "spam":      lambda: update_prot(chat.id, anti_spam=val),
-        "link":      lambda: update_prot(chat.id, anti_link=val),
-        "arabic":    lambda: update_prot(chat.id, anti_arabic=val),
-        "foreign":   lambda: update_prot(chat.id, anti_arabic=val),
-        "forward":   lambda: update_prot(chat.id, anti_forward=val),
-        "bot":       lambda: update_prot(chat.id, anti_bot=val),
-        "raid":      lambda: update_prot(chat.id, anti_raid=val),
-        "profanity": lambda: update_prot(chat.id, profanity_filter=val),
+        "on":        {"enabled": True},
+        "off":       {"enabled": False},
+        "flood":     {"anti_flood": val},
+        "spam":      {"anti_spam": val},
+        "link":      {"anti_link": val},
+        "arabic":    {"anti_arabic": val},
+        "foreign":   {"anti_arabic": val},
+        "forward":   {"anti_forward": val},
+        "bot":       {"anti_bot": val},
+        "raid":      {"anti_raid": val},
+        "profanity": {"profanity_filter": val},
     }
 
-    if cmd in mapping:
-        mapping[cmd]()
-        await update.message.reply_html(
-            f"✅ Protection <b>{cmd}</b> → <b>{'ON' if val else 'OFF'}</b>"
-        )
-    elif cmd == "flood" and val_str == "limit" and len(args) > 2:
+    if cmd == "flood" and val_str == "limit" and len(args) > 2:
         try:
             limit = int(args[2])
-            update_prot(chat.id, flood_limit=limit)
-            await update.message.reply_html(f"✅ Flood limit set to <b>{limit} msgs/{prot['flood_window']}s</b>")
+            await update_prot(chat.id, flood_limit=limit)
+            await update.message.reply_html(
+                f"✅ Flood limit set to <b>{limit} msgs/{prot['flood_window']}s</b>"
+            )
         except ValueError:
             await update.message.reply_html("❌ Invalid limit number!")
     elif cmd == "setlog":
         try:
             log_id = int(args[1])
-            update_prot(chat.id, log_channel=log_id)
+            await update_prot(chat.id, log_channel=log_id)
             await update.message.reply_html(f"✅ Log channel set to <code>{log_id}</code>")
         except (ValueError, IndexError):
             await update.message.reply_html("❌ Provide channel ID: /prot setlog -1001234567890")
+    elif cmd in mapping:
+        await update_prot(chat.id, **mapping[cmd])
+        await update.message.reply_html(
+            f"✅ Protection <b>{cmd}</b> → <b>{'ON' if val else 'OFF'}</b>"
+        )
     else:
         await update.message.reply_html("❌ Unknown option. Use /prot for help.")
 
@@ -570,28 +479,30 @@ async def prot_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ── /addword / /removeword / /badwords ────────────────────────────────────────
 
 async def addword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat = update.effective_chat; u = update.effective_user
+    chat = update.effective_chat
     if chat.type == "private": await update.message.reply_html("🚫 Group only!"); return
     if not await is_admin(update, context): await update.message.reply_html("❌ Admins only!"); return
-    if not context.args: await update.message.reply_html("Usage: /addword <word>"); return
+    if not context.args: await update.message.reply_html("Usage: /addword &lt;word&gt;"); return
     word = " ".join(context.args).lower()
-    add_bad_word(chat.id, word)
+    await add_bad_word(chat.id, word)
     await update.message.reply_html(f"✅ Bad word added: <b>{word}</b>")
 
+
 async def removeword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat = update.effective_chat; u = update.effective_user
+    chat = update.effective_chat
     if chat.type == "private": await update.message.reply_html("🚫 Group only!"); return
     if not await is_admin(update, context): await update.message.reply_html("❌ Admins only!"); return
-    if not context.args: await update.message.reply_html("Usage: /removeword <word>"); return
+    if not context.args: await update.message.reply_html("Usage: /removeword &lt;word&gt;"); return
     word = " ".join(context.args).lower()
-    remove_bad_word(chat.id, word)
+    await remove_bad_word(chat.id, word)
     await update.message.reply_html(f"✅ Removed: <b>{word}</b>")
+
 
 async def badwords_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     if chat.type == "private": await update.message.reply_html("🚫 Group only!"); return
     if not await is_admin(update, context): await update.message.reply_html("❌ Admins only!"); return
-    words = get_bad_words(chat.id)
+    words = await get_bad_words(chat.id)
     if not words: await update.message.reply_html("📋 No bad words set!"); return
     await update.message.reply_html(
         f"🤬 <b>Bad Words List</b>\n\n" + "\n".join(f"• {w}" for w in words)

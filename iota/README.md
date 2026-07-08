@@ -1,190 +1,243 @@
-# 🤖 Iota Bot — Complete Setup Guide
-**Owner: @Boobies_00**
+# 🤖 IOTA BOT — Complete Telegram Bot
 
----
+## ⚠️ FIRST: Required Setup (fixes "commands not working")
 
-## ✅ Step 1: Install Dependencies
+This update found and fixed the root causes behind most broken commands:
+
+1. **MongoDB password placeholder** — `config.py` had a literal placeholder
+   password (`YOUR_MONGODB_PASSWORD`), so the bot couldn't connect to its
+   database at all. **You must open `config.py` and replace `_MONGO_PASS`
+   with your real MongoDB Atlas password** (or your bot will start, but
+   `/bal`, `/daily`, `/rob`, `/ludo` etc. will still fail).
+2. **A missing `GIFS` config variable was crashing the entire bot on
+   startup** (`village_war.py` imported it but it didn't exist) — fixed.
+3. **Five handler files (`fun.py`, `items.py`, `welcome.py`,
+   `protection.py`) were using an old, disconnected SQLite database**
+   while the rest of the bot used MongoDB — meaning coins/items/settings
+   never matched what `/bal` showed. All five are now migrated to the
+   same MongoDB backend as everything else.
+4. **Added a global error handler** so a bug in one command can no longer
+   silently make it look like the bot "isn't responding" — you'll always
+   get a clear message instead.
+5. **Added a startup DB connection check** — if Mongo still isn't
+   reachable, the owner gets DM'd immediately with the exact fix needed.
+
+## ✨ Features
+
+### 💰 Economy
+`/daily` `/bal` `/rob` `/kill` `/revive` `/give` `/wallet` `/toprich`
+`/global_rank` `/streak` `/protect`
+
+### 🎮 Games
+- **`/ludo [bet]`** — Professional Ludo (2-4 players, real board logic,
+  captures, safe cells, coin betting, turn timers, visual board)
+- **`/bluff`** — Rebuilt as a real multiplayer card game: `/bluff` (host
+  opens a 2-min lobby) → `/enter` (join) → cards dealt via DM → `/drop a b`
+  to play cards claiming the called number → `/judge` to call a bluff.
+  First to empty their hand wins!
+- **`/hack <reward> <digits>`** — Password Hacking mini-game:
+  `/register` to join → `/guess <password>` → get HACKS/GLITCHES feedback
+  → `/end` for the host to close it.
+- **`/quiz [topic]`** — 🤖 **AI-generated** trivia questions, fresh every
+  time (falls back to a curated question bank if AI is unreachable)
+- **`/truth [topic]`** / **`/dare [topic]`** — 🤖 **AI-generated**, with
+  free real-time web search grounding for topical questions. Reply to
+  Iota's prompt and she reacts live, continuing a real conversation
+  instead of a static message. Use `/truth classic` or `/dare classic`
+  for the instant curated list.
+- `/card` `/bet` `/bomb` `/wordgame` `/hangman` `/tictactoe` `/rps`
+- `/roll [amount]` `/coinflip <heads/tails> [amount]`
+
+### 🤖 AI Chat
+- **Free real-time web search** (DuckDuckGo, no API key, unlimited) —
+  automatically triggers for questions about current events, scores,
+  prices, "latest", etc., so Iota's answers are grounded in real data.
+- **Smart tag detection** — Iota replies in groups only when she's
+  actually **@tagged**, **replied to**, or **directly addressed by name**
+  at the start of a message. She no longer randomly replies just because
+  someone says "iota" mid-sentence.
+- `/ai <message>` / DM her directly / `/clearmemory`
+
+### 👫 Social
+`/marry` `/divorce` `/couple` `/couples` `/crush` `/love` `/look`
+`/brain` `/stupid_meter` `/murder` `/slap` `/punch` `/kiss` `/hug`
+`/bite` `/puzzle` `/confession` `/afk` `/valentine`
+
+### 🛡️ Admin & Protection
+`.warn` `.mute` `.ban` `.kick` `.promote` `.pin` `/lock` `/setflood`
+`/rules` `/captcha` `/prot` (anti-flood/link/raid/profanity/bot)
+`/report` `/reports` `/addword`
+
+### 📜 Legal
+`/terms` / `/refund` / `/policy` — Iota's Terms of Service & Refund
+Policy for premium/Gems purchases.
+
+### 🏰 Village & War
+`/collect` `/storage` `/vault` `/mines` `/build` `/train` `/attack`
+`/spy` `/kingdom` `/emperors`
+
+### 🛠️ Utility
+`/calc` `/poll` `/ping` `/tr` `/voice` `/id` `/detail` `/bio` `/setbio`
+`/remindme` `/ocr` **`/last_seen <user_id>`** (shows last activity even
+if the user has hidden it elsewhere)
+
+### 💎 Premium
+`/pay` `/fpay` `/check`
+
+## 🚀 Setup
+
 ```bash
 pip install -r requirements.txt
 ```
 
----
-
-## ✅ Step 2: MongoDB Atlas Setup
-
-Your images show you already have MongoDB Atlas! Follow these steps:
-
-1. Go to **MongoDB Atlas** → Your Cluster → **Connect**
-2. Choose **"Connect your application"**
-3. Copy the connection string
-4. In `config.py`, replace `<PASSWORD>` with your actual password:
-```python
-MONGO_URI = "mongodb+srv://kalu923476:YOUR_PASSWORD@cluster0.tjpjh4k.mongodb.net/iota_bot?retryWrites=true&w=majority"
-```
-
-**Also add your IP to whitelist:**
-- Atlas Dashboard → Network Access → Add IP Address → Allow from Anywhere (0.0.0.0/0)
-
----
-
-## ✅ Step 3: BotFather Setup
-
-1. Open @BotFather on Telegram
-2. `/setcommands` → paste this list:
-
-```
-start - Talk To Iota
-daily - Claim Daily Coins
-bal - Check Balance
-rob - Rob Someone
-kill - Kill Someone
-revive - Revive
-protect - Buy Protection
-give - Gift Coins
-toprich - Top 10 Richest
-topkill - Top 10 Killers
-rank - Card Rank
-profile - Full Profile
-shop - Buy Titles
-work - Earn Coins
-top - Leaderboards
-gems - Gems Store
-claim - Group Reward
-coupons - Coupon Guide
-economy - Economy Info
-game - All Games
-card - Card Game
-bomb - Bomb Game
-bluff - Bluff Game
-hack - Hack Game
-tictactoe - Tic Tac Toe
-rps - Rock Paper Scissors
-quiz - Quiz Game
-hangman - Hangman
-wordgame - Word Game
-leaders - Card Leaders
-ship - Compatibility Check
-roast - Roast Someone
-compliment - Compliment Someone
-truth - Truth Question
-dare - Dare Challenge
-horoscope - Daily Horoscope
-shayari - Hindi Shayari
-meme - Random Meme
-whatif - AI Scenario
-story - Group Story
-ocr - Read Image Text
-remindme - Set Reminder
-voice - Text To Speech
-tr - Translate Text
-id - Get User ID
-collect - Collect Resources
-storage - Check Resources
-mines - Mine Levels
-build - Upgrade Buildings
-train - Train Troops
-troops - Show Army
-walls - Build Walls
-defense - Build Defense
-spy - Scout Enemy
-kingdom - Full Attack Plan
-attack - Attack Player
-vault - Check Vault And Rank
-settle - Move Coins
-convert - Resources To Coins
-emperors - Top 10 Emperors
-guide - Game Guide
-items - Available Items
-gift - Gift Item
-pay - Buy Premium
-fpay - Buy With Stars
-check - Check Protection
-help - Show All Commands
-panel - Owner Panel
-```
-
----
-
-## ✅ Step 4: Run The Bot
+In `config.py`:
+1. Set `_MONGO_PASS` to your real MongoDB Atlas password (**required**)
+2. Set `BOT_TOKEN` to your bot's token
+3. Set `OWNER_ID` to your Telegram user ID
 
 ```bash
 python bot.py
 ```
 
----
+On startup, check your logs (or your DM from the bot) to confirm
+`✅ MongoDB connected successfully!` — if you instead see a connection
+error, double-check the password and that your MongoDB Atlas cluster
+allows connections from your server's IP (Network Access → Add IP).
 
 ## 📁 File Structure
-
 ```
 iota_bot/
-├── bot.py                    ← Main entry point
-├── config.py                 ← All settings (BOT_TOKEN, MONGO_URI etc)
-├── requirements.txt
+├── bot.py                  — Main entry point
+├── config.py                — Configuration (⚠️ set _MONGO_PASS here)
 ├── handlers/
-│   ├── start.py              ← /start with Riruru-style castle image
-│   ├── economy.py            ← Baka-style economy with smallcaps fonts
-│   ├── premium.py            ← /pay /fpay /fgems (Telegram Stars)
-│   ├── games.py              ← Card, Bomb, Bluff, Hack, Word game
-│   ├── extra_games.py        ← TicTacToe, RPS, Hangman, Quiz, Ship, Meme etc
-│   ├── fun.py                ← Slap, Kiss, Hug, Valentine etc
-│   ├── items.py              ← Shop items
-│   ├── village_war.py        ← Full Riruru village + war system
-│   ├── admin.py              ← .warn .ban .mute .imute .promote etc
-│   ├── advanced_admin.py     ← /lock /flood /rules /captcha /notes etc
-│   ├── ai_chat.py            ← Sarvam AI (Baka-style personality)
-│   ├── alerts.py             ← Auto protection expiry DM alerts
-│   ├── welcome.py            ← New member welcome with GIF
-│   ├── protection.py         ← Anti-spam, anti-raid, reports
-│   ├── utility.py            ← /tr /voice /id /ocr etc
-│   └── owner_panel.py        ← /panel /addcoins /broadcast /announce
+│   ├── ludo.py               — Professional Ludo Game (chat mode + Mini App launcher)
+│   ├── werewolf_game.py       — 🆕 Werewolf social deduction game (5-10 players)
+│   ├── slots_game.py            — 🆕 /slots casino game (native Telegram animation)
+│   ├── quote_sticker.py           — 🆕 /q quote sticker generator
+│   ├── connect.py               — 🆕 /connect shared AI memory between two users
+│   ├── bluff_game.py          — 🆕 Real multiplayer Bluff card game
+│   ├── hack_game.py           — 🆕 Password Hacking mini-game
+│   ├── new_commands.py        — calc, poll, marry, streak, etc.
+│   ├── games.py                — Card, Bomb, Word games
+│   ├── extra_games.py          — 🆕 AI-powered Quiz, TTT, RPS, Hangman
+│   ├── fun.py                   — 🆕 AI-powered Truth/Dare, social cmds
+│   ├── ai_chat.py                — 🆕 AI chat + real-time search + smart tagging
+│   ├── legal.py                   — 🆕 Terms & Refund Policy
+│   ├── items.py / welcome.py / protection.py — 🆕 Migrated to MongoDB
+│   ├── admin.py / advanced_admin.py — Moderation
+│   ├── owner_panel.py              — 🆕 Owner-only bot administration
+│   └── village_war.py              — Village & war system
+├── webapp/
+│   ├── ludo_server.py         — 🆕 Ludo Mini App backend (aiohttp server)
+│   └── ludo/                    — 🆕 Ludo Mini App frontend (HTML/CSS/JS)
 └── utils/
-    ├── mongo_db.py           ← MongoDB async database
-    ├── helpers.py            ← Utility functions
-    └── fonts.py              ← Baka-style smallcaps fonts
+    ├── mongo_db.py            — All database operations (MongoDB)
+    ├── ai_provider.py          — Free + premium AI model routing
+    ├── search.py                — 🆕 Free unlimited real-time web search
+    ├── gif_provider.py            — 🆕 Live/unlimited GIF search (Tenor)
+    ├── reactions.py                 — 🆕 Iota's emoji reaction system
+    ├── connect.py                    — 🆕 Shared AI memory between two connected users
+    ├── command_knowledge.py            — 🆕 Single source of truth for Iota's self-knowledge
+    ├── ludo_engine.py               — 🆕 Shared Ludo rules engine (chat + Mini App)
+    ├── quote_render.py                — 🆕 /q quote-sticker image rendering (Pillow)
+    ├── font_manager.py                  — 🆕 Font handling for quote stickers
+    ├── system_gate.py                     — 🆕 /close-/open decorators (games/economy/village)
+    ├── permissions.py                 — 🆕 Unified owner/admin/group/DM decorators
+    ├── safe_html.py                    — 🆕 HTML-escaping helpers
+    ├── error_handler.py                 — 🆕 Global error handler
+    ├── ai_memory.py                       — Per-user AI conversation memory
+    └── helpers.py                          — Utility functions
 ```
 
----
+## 🎲 Ludo Mini App Setup
 
-## 🔑 Key Features
+`/ludo` now offers a real, visual, multiplayer Ludo board via Telegram's
+Mini App feature (in addition to the classic chat-button game, which
+always works with zero setup).
 
-| Feature | Command |
-|---------|---------|
-| Baka-style fonts | All outputs use smallcaps |
-| Protection alerts | Auto DM 6h, 2h, 30min before expiry |
-| AI personality | Cute, sassy like Baka bot |
-| Village war | /attack /troops /walls /defense |
-| Card tournament | With GIF result like Baka |
-| Telegram Stars payment | /fpay /fgems |
-| Owner announce | /announce all <message> |
-| Group protection | Flood, spam, link, raid auto-block |
-| Advanced admin | /lock /captcha /rules /notes etc |
+**The Mini App requires one thing you must configure: a public HTTPS URL.**
+Telegram will refuse to open a Mini App that isn't served over HTTPS from
+a real domain (no `localhost`, no bare IP address) — this is a Telegram
+platform requirement, not something in this code.
 
----
+### Steps to enable it
+1. Deploy this bot somewhere with a public HTTPS domain (most hosts —
+   Railway, Render, a VPS with a domain + reverse proxy, etc. — can do
+   this). The Mini App server runs **in the same process** as the bot
+   itself (started automatically), listening on `config.WEBAPP_PORT`
+   (default `8080`) — point your HTTPS reverse proxy at that port.
+2. Set `WEBAPP_BASE_URL` in `config.py` to that public HTTPS domain,
+   e.g. `WEBAPP_BASE_URL = "https://ludo.yourdomain.com"`.
+3. Restart the bot. `/ludo` will now show **"🎮 Play Ludo"** and
+   **"👀 Watch"** buttons that open the real board.
 
-## ⚠️ Important Notes
+Until `WEBAPP_BASE_URL` is set, `/ludo` automatically falls back to the
+classic chat-button game — nothing breaks, you just don't get the visual
+board until the domain is configured.
 
-1. **MongoDB password**: Must be URL-encoded (e.g., `@` → `%40`)
-2. **Sarvam AI**: Already configured with your key
-3. **GIFs**: Using Giphy URLs, can replace with Telegram file_ids for speed
-4. **Castle image**: Replace with your own image URL in `start.py`
-5. **Protection alerts**: Run automatically in background
+### What the Mini App includes
+- Real animated SVG board with all 4 colors, safe cells, and home stretch
+- Live dice rolls with a tumble animation, synced instantly to all
+  players and spectators via WebSocket
+- Spectator mode — anyone can watch a game live without playing
+- In-lobby / in-game chat, visible to players and spectators
+- The exact same rules engine (`utils/ludo_engine.py`) as the chat
+  version, so results are always fair and consistent
+- Every request is authenticated via Telegram's official `initData`
+  signature check — a user can never impersonate another player
 
----
+## ⭐ How Telegram Stars payments work
 
-## 👑 Owner Commands (Only @Boobies_00)
+`/pay` and `/gems` charge real Telegram Stars via `send_invoice()`.
+Telegram Stars **always** accumulate on the Telegram account that
+registered this bot with @BotFather — there is no per-payment "send to
+a different account" option in the Bot API, and none is needed: as long
+as you (config.OWNER_ID) are that bot's registered owner, every Star
+already lands with you automatically. You withdraw accumulated Stars via
+[Fragment](https://fragment.com), separately from this bot's code.
+Users never see any of this — `/starsstats` (owner-only) is the only
+place transaction history is visible.
 
-```
-/panel        - Owner menu
-/addcoins     - Add coins to user
-/removecoins  - Remove coins
-/addgems      - Add gems
-/addpremium   - Give premium
-/removepremium - Remove premium
-/addcoupon    - Add coupon code
-/banuser      - Ban from bot
-/unbanuser    - Unban
-/broadcast    - Message all users
-/announce all <msg> - Send to all groups
-/announce <group_id> <msg> - Send to specific group
-/botstats     - Bot statistics
-```
+## 📢 Update Channel Setup
+
+`/start`'s menu has a button (where "Friends" used to be) that links
+straight to your update channel:
+1. Create a Telegram channel, make it **public** (so it gets a @username).
+   Suggested short name to check availability on: **IotaUpdates**.
+2. Set `UPDATE_CHANNEL_USERNAME = "IotaUpdates"` (no leading @) in `config.py`.
+3. Restart the bot. The button now links directly to your channel.
+
+Leave it blank and the button falls back to the original Friends menu —
+nothing ever points to a broken link.
+
+## 🎭 Setting up sticker packs
+
+`/addsticker <mood>` (reply to any sticker, owner-only) — builds up
+Iota's own reply-stickers entirely from Telegram, no code edits needed.
+See `/panel` for the full list: `/stickerpacks`, `/previewsticker`,
+`/clearstickers`.
+
+## 🔊 Voice/TTS settings
+
+`/ttssettings` (owner-only) — change Iota's voice model, speaker, speed,
+pitch, and loudness directly from Telegram. `/previewtts <text>` to hear
+the current settings before committing to them.
+
+## 🖼️ /q Quote Stickers
+
+Reply to any text message with `/q` to turn it into a styled quote
+sticker (name + avatar + text). Works out of the box, but for guaranteed
+offline-safe, best-quality Hindi/emoji rendering, download these once
+and place them in `assets/fonts/` (the bot will also try to auto-download
+them on first use if your host has internet access):
+- `NotoSans-Regular.ttf` / `NotoSans-Bold.ttf` — https://fonts.google.com/noto/specimen/Noto+Sans
+- `NotoSansDevanagari-Regular.ttf` / `NotoSansDevanagari-Bold.ttf` — https://fonts.google.com/noto/specimen/Noto+Sans+Devanagari
+
+## 🔒 /close and /open (games / economy / village)
+
+Group admins can disable all games, all economy commands, all village-
+war commands — or any combination — with `/close` (add `games`,
+`economy`, or `village` to close just one system). `/open` reopens the
+same way. State is saved in MongoDB, so it survives a bot restart.
+
+

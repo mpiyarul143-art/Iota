@@ -1,3 +1,14 @@
+"""
+⚠️ DEPRECATED — NOT USED ANYWHERE IN THE BOT ANYMORE.
+
+This was the bot's original SQLite database layer. All handler files
+(fun.py, items.py, welcome.py, protection.py) have been migrated to the
+MongoDB layer in utils/mongo_db.py for consistency with the rest of the
+bot (economy, games, ludo, etc. all use MongoDB).
+
+This file is kept only for reference / in case you had old custom code
+relying on it. It is safe to delete. The bot does not import from here.
+"""
 import sqlite3, threading, time
 from pathlib import Path
 

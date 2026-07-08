@@ -19,7 +19,12 @@ LANG_MAP = {
     "ml":"ml-IN","pa":"pa-IN","or":"or-IN","ur":"ur-IN",
 }
 SPEAKER_MAP = {
-    "hi":"meera","en":"anushka","bn":"anushka","te":"anushka",
+    # 🔴 FIXED: "meera" was never a valid Sarvam speaker name for any
+    # model — this made every Hindi /voice request fail. Valid bulbul:v2
+    # speakers are: anushka, manisha, vidya, arya (female), abhilash,
+    # karun, hitesh (male). Using "anushka" everywhere for consistency
+    # and because it's the well-supported default voice.
+    "hi":"anushka","en":"anushka","bn":"anushka","te":"anushka",
     "mr":"anushka","ta":"anushka","gu":"anushka",
 }
 
@@ -78,9 +83,16 @@ async def voice_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await thinking.delete()
             await msg.reply_voice(af, caption=f"🔊 {text[:80]}")
         else:
-            await thinking.edit_text(f"❌ {sc('TTS failed!')}")
+            await thinking.edit_text(
+                f"❌ {sc('TTS failed!')} Sarvam API returned no audio — "
+                f"check the bot's logs for the exact reason, or try again shortly."
+            )
     except Exception as e:
-        await thinking.edit_text(f"❌ {sc('Voice error')}: {e}")
+        from utils.safe_html import safe_html
+        try:
+            await thinking.edit_text(f"❌ {sc('Voice error')}: {safe_html(e)}", parse_mode="HTML")
+        except Exception:
+            await thinking.edit_text(f"❌ {sc('Voice generation failed. Please try again.')}")
 
 # ── /id ───────────────────────────────────────────────────────────────────────
 
@@ -104,7 +116,7 @@ async def id_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"💬 {sc('Chat ID')}: <code>{chat.id}</code>"
         )
 
-# ── /detail (with name/username history like Baka) ────────────────────────────
+# ── /detail (with name/username history Iota style) ────────────────────────────
 
 async def detail_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message; u = update.effective_user
@@ -121,13 +133,28 @@ async def detail_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 m = await context.bot.get_chat_member(update.effective_chat.id, uid)
                 tu = m.user
             else:
-                ch = await context.bot.get_chat(f"@{arg}")
-                # Fake user object from chat
-                class _FU:
-                    def __init__(s):
-                        s.id=ch.id; s.full_name=getattr(ch,'first_name','?')
-                        s.username=getattr(ch,'username',None); s.is_bot=False
-                tu = _FU()
+                try:
+                    ch = await context.bot.get_chat(f"@{arg}")
+                    # Fake user object from chat
+                    class _FU:
+                        def __init__(s):
+                            s.id=ch.id; s.full_name=getattr(ch,'first_name','?')
+                            s.username=getattr(ch,'username',None); s.is_bot=False
+                    tu = _FU()
+                except Exception:
+                    # 🔴 FIX: get_chat("@username") fails often even for
+                    # real, known users (uncached username, privacy
+                    # settings, API hiccups). Fall back to our own DB
+                    # before giving up — same fix as handlers/admin.py.
+                    from utils.mongo_db import get_user_by_username
+                    du = await get_user_by_username(arg)
+                    if not du:
+                        raise
+                    class _FU:
+                        def __init__(s):
+                            s.id=du["_id"]; s.full_name=du.get("full_name") or "?"
+                            s.username=du.get("username"); s.is_bot=False
+                    tu = _FU()
         except Exception:
             await msg.reply_html(f"⚠️ {sc('Usage')}: /detail <{sc('reply/id')}>"); return
     else:
@@ -137,9 +164,21 @@ async def detail_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     d = await get_user(tu.id)
     from utils.helpers import xp_level, rank_title, fmt
 
-    # Name & username history (like Baka)
-    name_hist = d.get("name_history", [])
-    user_hist = d.get("username_history", [])
+    # Name & username history (Iota style). Now that ensure_user() properly
+    # seeds and accumulates history (see utils/mongo_db.py), this correctly
+    # shows every past name/username, not just the current one.
+    name_hist = list(d.get("name_history", []))
+    user_hist = list(d.get("username_history", []))
+
+    # Always show the CURRENT name/username first, even if it hasn't
+    # changed since history was last recorded (matches how the reference
+    # bot always lists the live value at the top of the list).
+    current_name = d.get("full_name") or tu.full_name
+    current_user = d.get("username") or (getattr(tu, "username", None) or "")
+    if current_name and current_name not in name_hist:
+        name_hist = [current_name] + name_hist
+    if current_user and current_user not in user_hist:
+        user_hist = [current_user] + user_hist
 
     lv = xp_level(d.get("xp",0))
     rank = await get_user_rank(tu.id)
@@ -147,13 +186,13 @@ async def detail_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     hist_section = f"\n{mention(tu)}'s History\n" + '_'*24 + "\n\n"
     if name_hist:
         hist_section += f"{sc('Full Names')}:\n"
-        for n in name_hist[:5]: hist_section += f"• {n}\n"
+        for n in name_hist[:10]: hist_section += f"• {n}\n"
     else:
         hist_section += f"{sc('Full Names')}:\n• {tu.full_name}\n"
     hist_section += "\n-----------\n\n"
     if user_hist:
         hist_section += f"{sc('Usernames')}:\n"
-        for un in user_hist[:5]: hist_section += f"• @{un}\n"
+        for un in user_hist[:10]: hist_section += f"• @{un}\n"
     else:
         hist_section += f"{sc('Usernames')}:\n• @{getattr(tu,'username',None) or 'None'}\n"
 
@@ -178,10 +217,10 @@ async def last_seen_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         uid = msg.reply_to_message.from_user.id
     elif context.args:
         try: uid = int(context.args[0])
-        except Exception: await msg.reply_html("❌ Usage: /last_seen <user_id>"); return
+        except Exception: await msg.reply_html("❌ Usage: /last_seen &lt;user_id&gt;"); return
     else:
         await msg.reply_html(
-            f"👀 {sc('Usage')}: /last_seen <user_id>\n"
+            f"👀 {sc('Usage')}: /last_seen &lt;user_id&gt;\n"
             f"{sc('Or reply to a user message')}"
         ); return
 
@@ -258,7 +297,7 @@ async def own_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await msg.reply_html(
                 f"⚠️ {sc('Reply To A Sticker To Add In Your Pack.')}\n\n"
-                f"{sc('Setup')}: /own set <pack_name>"
+                f"{sc('Setup')}: /own set &lt;pack_name&gt;"
             )
         return
     if context.args and context.args[0].lower()=="set" and len(context.args)>=2:
@@ -267,7 +306,7 @@ async def own_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_html(f"✅ Pack set!\nt.me/addstickers/{pack_name}"); return
     await msg.reply_html(
         f"⚠️ {sc('Reply To A Sticker To Add In Your Pack.')}\n\n"
-        f"{sc('Or')}: /own set <pack_name>"
+        f"{sc('Or')}: /own set &lt;pack_name&gt;"
     )
 
 # ── /setgroup & /topgroups ────────────────────────────────────────────────────
@@ -283,7 +322,7 @@ async def setgroup_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ); return
     args = context.args
     if not args or len(args)<2:
-        await update.message.reply_html("Usage: /setgroup <name> <link>"); return
+        await update.message.reply_html("Usage: /setgroup &lt;name&gt; &lt;link&gt;"); return
     await set_top_group(min(rank,5), u.id, args[0], args[1])
     await update.message.reply_html(f"✅ Group set at rank #{min(rank,5)}!")
 

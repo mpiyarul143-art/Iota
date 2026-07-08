@@ -1,10 +1,32 @@
 """
 Iota Premium Handler
 - 3 months duration
-- Stars go to owner's Telegram account
-- Free 1-day protection for all
-- 2-day protection for premium only
+- 1-day protection: 400 coins (all users) — see handlers/economy.py protect_cmd
+- 2-day protection: premium only
 - /check shows timing privately (DM forward)
+
+HOW STARS PAYMENTS REACH THE OWNER
+────────────────────────────────────
+This is a factual note for whoever maintains this bot — nothing below is
+shown to users, and there is nothing further to configure here.
+
+Telegram Stars (currency="XTR") sent via send_invoice() ALWAYS accumulate
+on the balance of the bot that issued the invoice — not on any per-payment
+"recipient" field, because the Bot API has no such field. Telegram
+attributes every bot's Stars balance to whichever Telegram account
+registered that bot with @BotFather (i.e. the bot's owner). Only that
+owner account can later withdraw the accumulated Stars (converted to TON)
+via Fragment (https://fragment.com) — this happens completely outside
+the bot's code, directly between the owner's Telegram account and
+Fragment.
+
+So: as long as config.OWNER_ID's Telegram account is the one that
+actually created/owns this bot via BotFather, every Star spent through
+/pay or /gems already lands with the owner automatically — there is no
+redirection logic to add, and no other Telegram account can intercept or
+redirect that balance. log_stars_payment() below simply records each
+transaction for the owner's own /starsstats audit trail (owner-only,
+see handlers/owner_panel.py) — it does not move money itself.
 """
 import time
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, LabeledPrice

@@ -12,7 +12,7 @@ from telegram import Update, ChatPermissions
 from telegram.ext import ContextTypes
 from telegram.error import TelegramError
 from utils.mongo_db import get_db, ensure_user, get_user, update_user
-from utils.helpers import mention, ts, is_admin
+from utils.helpers import mention, ts, is_admin, promote_with_rights
 from utils.fonts import sc
 
 # ── Member Tags DB ────────────────────────────────────────────────────────────
@@ -55,9 +55,9 @@ async def settag_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_admin(update, context):
         await msg.reply_html("❌ Admins only!"); return
     if not msg.reply_to_message or not msg.reply_to_message.from_user:
-        await msg.reply_html("❌ Reply to a user to set their tag!\nUsage: /settag <tag> (reply)"); return
+        await msg.reply_html("❌ Reply to a user to set their tag!\nUsage: /settag &lt;tag&gt; (reply)"); return
     if not context.args:
-        await msg.reply_html("❌ Usage: /settag <tag> (reply to user)"); return
+        await msg.reply_html("❌ Usage: /settag &lt;tag&gt; (reply to user)"); return
     target = msg.reply_to_message.from_user
     tag = " ".join(context.args)
     if len(tag) > 20:
@@ -135,14 +135,26 @@ PROMOTE_TITLES = {
 
 async def promote_with_title(update: Update, context: ContextTypes.DEFAULT_TYPE,
                               uid: int, uname: str, level_str: str):
-    """Called from admin.py — promotes with Baka-style title."""
+    """Called from admin.py — promotes with Iota-style title."""
     chat = update.effective_chat
     info = PROMOTE_TITLES.get(level_str, PROMOTE_TITLES["1"])
     medal, title_name, rights_kw = info
     try:
         from telegram import ChatAdministratorRights
-        rights = ChatAdministratorRights(**rights_kw)
-        await context.bot.promote_chat_member(chat.id, uid, rights=rights)
+        # 🔴 FIX: same bug as handlers/admin.py — ChatAdministratorRights
+        # requires is_anonymous/can_manage_video_chats/etc. to be passed
+        # explicitly even when False; rights_kw here only has a partial
+        # set, which raised an uncaught TypeError on every call.
+        full_rights = dict(
+            is_anonymous=False, can_manage_chat=False, can_delete_messages=False,
+            can_manage_video_chats=False, can_restrict_members=False,
+            can_promote_members=False, can_change_info=False, can_invite_users=False,
+            can_post_messages=False, can_edit_messages=False, can_pin_messages=False,
+            can_post_stories=False, can_edit_stories=False, can_delete_stories=False,
+        )
+        full_rights.update(rights_kw)
+        rights = ChatAdministratorRights(**full_rights)
+        await promote_with_rights(context.bot, chat.id, uid, rights)
         # Set custom title
         try:
             await context.bot.set_chat_administrator_custom_title(chat.id, uid, title_name)

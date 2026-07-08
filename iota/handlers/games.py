@@ -1,23 +1,31 @@
 """
 Iota Bot — Games Handler
 Card game with:
-  • GIF result (like Baka bot)
+  • GIF result (Iota style)
   • Tie → normal users eliminated, premium share prize
   • Streak tracking
   • Card rank update
   • 5% fee (premium exempt)
   • XP gain
 """
+import logging
 import random, uuid, asyncio, json
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import ContextTypes
 from utils.mongo_db import (
     ensure_user, get_user, update_user, add_balance, deduct_balance,
     get_card_rank, update_card_rank, get_card_leaders, get_card_rank_position,
-    is_gaming_open, set_gaming_status
+    set_system_status
 )
-from utils.helpers import mention, mention_id, fmt, xp_level, rank_title
-from config import GIFS, CARD_FEE_PERCENT, CARD_XP_WIN, CARD_XP_LOSS, ITEMS
+from utils.helpers import mention, mention_id, fmt, xp_level, rank_title, ts
+from utils.fonts import sc
+from utils.gif_provider import get_gif_for_mood
+from utils.safe_html import placeholder
+from utils.system_gate import games_gate
+from config import (CARD_FEE_PERCENT, CARD_XP_WIN, CARD_XP_LOSS, ITEMS,
+                     CARD_MIN_BET, CARD_MAX_BET, CARD_LOBBY_TIMEOUT_SECONDS)
+
+logger = logging.getLogger(__name__)
 
 # ── In-memory game state (card games) ────────────────────────────────────────
 _card_games: dict = {}   # game_id -> game dict
@@ -49,7 +57,7 @@ async def game_list_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await q.edit_message_text(
             "🎮 <b>Iota Mini Games</b>\n\n"
             "🃏 /card — Card Game (4 rounds)\n"
-            "🃏 /bet <amount> — Card Game with Bet\n"
+            "🃏 /bet &lt;amount&gt; — Card Game with Bet\n"
             "💣 /bomb — Bomb Passing Game\n"
             "🎭 /bluff — Bluff Card Game\n"
             "💻 /hack — Hack the Code\n"
@@ -76,9 +84,22 @@ async def open_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     from utils.helpers import is_admin
     if not await is_admin(update, context):
         await update.message.reply_html("❌ Admins only!"); return
-    await set_gaming_status(chat.id, True)
+
+    # 🔴 /open (and /close below) now control ALL THREE closable
+    # systems together by default — games, economy, AND village —
+    # matching the reference behaviour where /close disables everything
+    # at once. A specific system name can still be given to reopen just
+    # one of them (e.g. "/open economy") if the admin only wants that.
+    args = [a.lower() for a in context.args]
+    valid_systems = {"games", "economy", "village"}
+    targets = [a for a in args if a in valid_systems] or list(valid_systems)
+
+    await set_system_status(chat.id, **{k: True for k in targets})
+    names = ", ".join(t.title() for t in targets)
     await update.message.reply_html(
-        "💚 <b>Gaming Commands OPENED!</b>\n\nAll mini games are now available."
+        f"💚 <b>{names} System{'s' if len(targets) > 1 else ''} OPENED!</b>\n\n"
+        f"{'All games, economy, and village commands are' if len(targets) == 3 else names + ' commands are'} "
+        f"now available again."
     )
 
 
@@ -89,9 +110,18 @@ async def close_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     from utils.helpers import is_admin
     if not await is_admin(update, context):
         await update.message.reply_html("❌ Admins only!"); return
-    await set_gaming_status(chat.id, False)
+
+    args = [a.lower() for a in context.args]
+    valid_systems = {"games", "economy", "village"}
+    targets = [a for a in args if a in valid_systems] or list(valid_systems)
+
+    await set_system_status(chat.id, **{k: False for k in targets})
+    names = ", ".join(t.title() for t in targets)
     await update.message.reply_html(
-        "🔴 <b>Gaming Commands CLOSED!</b>\n\nMini games disabled for now."
+        f"🔒 <b>{names} System{'s' if len(targets) > 1 else ''} CLOSED!</b>\n\n"
+        f"{'All economy, games, and village commands are' if len(targets) == 3 else names + ' commands are'} "
+        f"now disabled in this group.\n"
+        f"Reopen with: /open" + (f" {targets[0]}" if len(targets) == 1 else "")
     )
 
 
@@ -100,7 +130,7 @@ async def close_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def leaders_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     rows   = await get_card_leaders(10)
     medals = ["🥇","🥈","🥉","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"]
-    text   = "🏆 <b>Bᴀᴋᴀ Cᴏɪɴ Tᴏᴜʀɴᴀᴍᴇɴᴛ — Lᴇᴀᴅᴇʀʙᴏᴀʀᴅ</b>\n\n"
+    text   = "🏆 <b>Iota Coin Tournament — Leaderboard</b>\n\n"
     for i, r in enumerate(rows):
         try:
             u = await context.bot.get_chat(r["_id"])
@@ -118,7 +148,7 @@ async def leaders_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ═══════════════════════════════════════════════════════
-#  CARD GAME — Full Baka-style
+#  CARD GAME — Full Iota-style
 # ═══════════════════════════════════════════════════════
 
 def _gen_hand():
@@ -126,22 +156,22 @@ def _gen_hand():
     return [random.randint(1, 10) for _ in range(4)]
 
 
+@games_gate
 async def card_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u    = update.effective_user
     chat = update.effective_chat
     if chat.type == "private":
         await update.message.reply_html("🎮 Yᴏᴜ Cᴀɴ Pʟᴀʏ Tʜᴇ Cᴀʀᴅ Gᴀᴍᴇ Iɴ Gʀᴏᴜᴘ Oɴʟʏ."); return
-    if not await is_gaming_open(chat.id):
-        await update.message.reply_html("🔴 Gaming is closed in this group! Admin: /open"); return
 
     await ensure_user(u.id, u.username or "", u.full_name)
     gid = str(uuid.uuid4())[:8]
     _card_games[gid] = {
         "chat_id": chat.id, "player1": u.id, "player2": 0,
+        "player1_name": u.first_name,  # stored once, avoids a redundant get_chat() call on join
         "bet": 0, "p1_cards": [], "p2_cards": [],
         "p1_choices": {}, "p2_choices": {},
         "round": 1, "score1": 0, "score2": 0,
-        "status": "waiting"
+        "status": "waiting", "created_at": ts(),
     }
     kb = InlineKeyboardMarkup([[
         InlineKeyboardButton("🃏 Join Game", callback_data=f"card_join_{gid}"),
@@ -151,27 +181,39 @@ async def card_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🃏 <b>Cᴀʀᴅ Gᴀᴍᴇ</b>\n\n"
         f"Host: {mention(u)}\n"
         f"💰 Bet: Free\n\n"
-        f"Waiting for player 2...",
+        f"Waiting for player 2... (auto-cancels in {CARD_LOBBY_TIMEOUT_SECONDS}s if nobody joins)",
         reply_markup=kb
     )
+    asyncio.create_task(_card_lobby_timeout(context, gid))
 
 
+@games_gate
 async def bet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u    = update.effective_user
     chat = update.effective_chat
     if chat.type == "private":
         await update.message.reply_html("🎮 Yᴏᴜ Cᴀɴ Pʟᴀʏ Tʜᴇ Cᴀʀᴅ Gᴀᴍᴇ Iɴ Gʀᴏᴜᴘ Oɴʟʏ."); return
-    if not await is_gaming_open(chat.id):
-        await update.message.reply_html("🔴 Gaming is closed!"); return
 
     if not context.args:
-        await update.message.reply_html("❌ Usage: /bet <amount>"); return
+        await update.message.reply_html(
+            f"❌ Usage: /bet {placeholder('amount')}\n"
+            f"Bet range: {fmt(CARD_MIN_BET)} – {fmt(CARD_MAX_BET)}"
+        ); return
     try:
         amount = int(context.args[0])
     except ValueError:
-        await update.message.reply_html("❌ Invalid amount!"); return
-    if amount <= 0:
-        await update.message.reply_html("❌ Amount must be positive!"); return
+        # 🔴 Was previously just "Invalid amount!" — now tells the user
+        # exactly what's wrong (decimals, letters, etc. all land here).
+        await update.message.reply_html("❌ Invalid amount! Bet must be a whole number (no decimals/letters)."); return
+    # 🔴 FIX: there was previously NO upper bound at all — Python's
+    # arbitrary-precision ints meant even a 30-digit "bet" was accepted
+    # as syntactically valid before the balance check caught it. Also
+    # no minimum, so a 1-coin "bet" was technically allowed. Added real
+    # limits here, consistent with every other betting game in the bot.
+    if amount < CARD_MIN_BET:
+        await update.message.reply_html(f"❌ Minimum bet is {fmt(CARD_MIN_BET)}!"); return
+    if amount > CARD_MAX_BET:
+        await update.message.reply_html(f"❌ Maximum bet is {fmt(CARD_MAX_BET)}!"); return
 
     await ensure_user(u.id, u.username or "", u.full_name)
     d = await get_user(u.id)
@@ -183,10 +225,11 @@ async def bet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     gid = str(uuid.uuid4())[:8]
     _card_games[gid] = {
         "chat_id": chat.id, "player1": u.id, "player2": 0,
+        "player1_name": u.first_name,
         "bet": amount, "p1_cards": [], "p2_cards": [],
         "p1_choices": {}, "p2_choices": {},
         "round": 1, "score1": 0, "score2": 0,
-        "status": "waiting"
+        "status": "waiting", "created_at": ts(),
     }
     kb = InlineKeyboardMarkup([[
         InlineKeyboardButton(f"🃏 Join (Bet: {fmt(amount)})", callback_data=f"card_join_{gid}"),
@@ -196,14 +239,43 @@ async def bet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🃏 <b>Cᴀʀᴅ Gᴀᴍᴇ</b>\n\n"
         f"Host: {mention(u)}\n"
         f"💰 Bet: <b>{fmt(amount)}</b>\n\n"
-        f"Waiting for opponent...",
+        f"Waiting for opponent... (auto-cancels + refunds in {CARD_LOBBY_TIMEOUT_SECONDS}s if nobody joins)",
         reply_markup=kb
     )
+    asyncio.create_task(_card_lobby_timeout(context, gid))
 
 
+async def _card_lobby_timeout(context, gid: str):
+    """
+    🔴 FIX: previously there was NO timeout mechanism at all for the
+    card game lobby — an abandoned "waiting for player 2" game (nobody
+    joins, or the host forgets about it) sat in memory forever with no
+    way to clean it up except someone manually tapping Cancel. Since no
+    coins are actually deducted until a second player joins (see
+    card_callback below), there's no refund needed here — just cleanup
+    — but this closes off the "stuck session forever" class of bug.
+    """
+    await asyncio.sleep(CARD_LOBBY_TIMEOUT_SECONDS)
+    game = _card_games.get(gid)
+    if not game or game["status"] != "waiting":
+        return  # already joined, cancelled, or otherwise resolved
+    _card_games.pop(gid, None)
+    try:
+        await context.bot.send_message(
+            game["chat_id"],
+            f"🃏 Card game lobby (host: {game.get('player1_name', 'Player')}) "
+            f"timed out — nobody joined in {CARD_LOBBY_TIMEOUT_SECONDS}s. "
+            f"Start a new one anytime with /card or /bet!",
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logger.debug(f"_card_lobby_timeout: notify failed for {gid}: {e}")
+
+
+@games_gate
 async def flip_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_html(
-        "❓ Use the buttons inside the card game to flip!\nStart a game: /card or /bet <amount>"
+        "❓ Use the buttons inside the card game to flip!\nStart a game: /card or /bet &lt;amount&gt;"
     )
 
 
@@ -244,11 +316,10 @@ async def card_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         game["status"]    = "playing"
         _card_games[gid]  = game
 
-        try:
-            p1u = await context.bot.get_chat(game["player1"])
-            p1_name = p1u.first_name
-        except Exception:
-            p1_name = "Player1"
+        # 🔴 Was calling context.bot.get_chat() here on every single
+        # join just to re-fetch the host's name — pointless extra API
+        # call for information already known at game-creation time.
+        p1_name = game.get("player1_name", "Player1")
 
         kb = _card_buttons(gid)
         await q.edit_message_text(
@@ -265,9 +336,18 @@ async def card_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ── CANCEL ────────────────────────────────────────────────────────────────
     if data.startswith("card_cancel_"):
         gid  = data[len("card_cancel_"):]
-        game = _card_games.pop(gid, None)
-        if game and game["player1"] != u.id:
+        # 🔴 FIX: this used to pop() the game from _card_games BEFORE
+        # checking whether the caller was actually the host — so any
+        # random player in the group could destroy someone else's game
+        # lobby by tapping Cancel, even though the bot would then (too
+        # late) tell them "Only host can cancel!". The permission check
+        # must happen before any state is mutated, not after.
+        game = _card_games.get(gid)
+        if not game:
+            await q.answer("Game already ended or expired!", show_alert=True); return
+        if game["player1"] != u.id:
             await q.answer("Only host can cancel!", show_alert=True); return
+        _card_games.pop(gid, None)
         await q.edit_message_text("❌ Card game cancelled!")
         return
 
@@ -365,6 +445,65 @@ async def _resolve_round(q, context, gid):
         )
 
 
+async def _bot_can_pin(context, chat_id) -> bool:
+    """True only if the bot itself is an admin with pin permission in
+    this chat (or the chat creator, which always can). Never assumes —
+    always checks live, since permissions can change between games."""
+    try:
+        member = await context.bot.get_chat_member(chat_id, context.bot.id)
+        if member.status == "creator":
+            return True
+        if member.status == "administrator":
+            return bool(getattr(member, "can_pin_messages", False))
+        return False
+    except Exception:
+        return False
+
+
+async def _announce_final_winner(context, chat_id: int, winner_id: int | None, result_text: str):
+    """
+    🆕 Sends the final-winner card game result. Tries, in order:
+    1. The winner's own profile photo as the image (what was asked for
+       — "final winner ka photo bhi aaye").
+    2. A mood GIF (previous behaviour), if no profile photo exists.
+    3. Plain text, if both of the above fail for any reason.
+    Then auto-pins the sent message, but ONLY if the bot actually has
+    pin permission in this chat — checked live via _bot_can_pin(), never
+    assumed, so this never raises a permission error for groups where
+    the bot isn't an admin.
+    """
+    sent = None
+    if winner_id:
+        try:
+            photos = await context.bot.get_user_profile_photos(winner_id, limit=1)
+            if photos and photos.total_count > 0:
+                file_id = photos.photos[0][-1].file_id
+                sent = await context.bot.send_photo(chat_id, file_id, caption=result_text, parse_mode="HTML")
+        except Exception as e:
+            logger.debug(f"_announce_final_winner: profile photo failed: {e}")
+
+    if sent is None:
+        try:
+            win_gif = await get_gif_for_mood("card_win")
+            if win_gif:
+                sent = await context.bot.send_animation(chat_id, animation=win_gif, caption=result_text, parse_mode="HTML")
+        except Exception as e:
+            logger.debug(f"_announce_final_winner: gif fallback failed: {e}")
+
+    if sent is None:
+        try:
+            sent = await context.bot.send_message(chat_id, result_text, parse_mode="HTML")
+        except Exception as e:
+            logger.debug(f"_announce_final_winner: text fallback failed: {e}")
+            return
+
+    if await _bot_can_pin(context, chat_id):
+        try:
+            await context.bot.pin_chat_message(chat_id, sent.message_id, disable_notification=True)
+        except Exception as e:
+            logger.debug(f"_announce_final_winner: pin failed: {e}")
+
+
 async def _end_game(q, context, gid, p1_name, p2_name, p1c, p1v, p2c, p2v, rw_text):
     game = _card_games.pop(gid, None)
     if not game:
@@ -382,12 +521,18 @@ async def _end_game(q, context, gid, p1_name, p2_name, p1c, p1v, p2c, p2v, rw_te
     is_tie = (s1 == s2)
 
     if is_tie:
-        # Tie logic (like Baka): normal users eliminated, premium share
+        # Tie logic (Iota style): normal users eliminated, premium share
         p1_prem = p1d["is_premium"]
         p2_prem = p2d["is_premium"]
 
+        # 🔴 FIX: the tie-branch message always claimed a fee was taken
+        # ("Won: X (10% Fee)") but the prize math here never actually
+        # deducted one — only the non-tie branch below did. Now the fee
+        # is genuinely applied in the "both normal" tie case too,
+        # consistently with the non-tie branch, and premium players
+        # stay fee-exempt in both, matching what the message claims.
         if p1_prem and p2_prem:
-            # Both premium: split prize
+            # Both premium: split prize, no fee (fee-exempt)
             prize = bet * 2 if bet > 0 else 0
             each = prize // 2
             if each > 0:
@@ -396,30 +541,49 @@ async def _end_game(q, context, gid, p1_name, p2_name, p1c, p1v, p2c, p2v, rw_te
             tie_result_text = f"⚖️ Tɪᴇ Dᴇᴛᴇᴄᴛᴇᴅ! Nᴏʀᴍᴀʟ ᴜꜱᴇʀꜱ ᴇʟɪᴍɪɴᴀᴛᴇᴅ, Pʀᴇᴍɪᴜᴍ Pʟᴀʏᴇʀꜱ ꜱʜᴀʀᴇ Pʀɪᴢᴇ 💓"
             winner_ids = [p1_id, p2_id]
             prize_each = each
+            fee_applied = 0  # both premium — fee-exempt, matches non-tie branch's rule
         elif p1_prem:
-            winner_ids = [p1_id]; prize_each = bet*2 if bet else 0
+            gross = bet*2 if bet else 0
+            prize_each = gross  # premium winner — fee-exempt
+            winner_ids = [p1_id]
             if prize_each: await add_balance(p1_id, prize_each)
             tie_result_text = f"⚖️ Tɪᴇ! Nᴏʀᴍᴀʟ ᴜꜱᴇʀ ᴇʟɪᴍɪɴᴀᴛᴇᴅ, Pʀᴇᴍɪᴜᴍ Wɪɴꜱ 💓"
+            fee_applied = 0
         elif p2_prem:
-            winner_ids = [p2_id]; prize_each = bet*2 if bet else 0
+            gross = bet*2 if bet else 0
+            prize_each = gross  # premium winner — fee-exempt
+            winner_ids = [p2_id]
             if prize_each: await add_balance(p2_id, prize_each)
             tie_result_text = f"⚖️ Tɪᴇ! Nᴏʀᴍᴀʟ ᴜꜱᴇʀ ᴇʟɪᴍɪɴᴀᴛᴇᴅ, Pʀᴇᴍɪᴜᴍ Wɪɴꜱ 💓"
+            fee_applied = 0
         else:
-            # Both normal: random winner
+            # Both normal: random winner, fee genuinely applies here now
             winner_id = random.choice([p1_id, p2_id])
-            winner_ids = [winner_id]; prize_each = bet*2 if bet else 0
+            gross = bet*2 if bet else 0
+            fee_applied = int(gross * CARD_FEE_PERCENT / 100)
+            prize_each = gross - fee_applied
+            winner_ids = [winner_id]
             if prize_each: await add_balance(winner_id, prize_each)
             tie_result_text = f"⚖️ Tɪᴇ! Rᴀɴᴅᴏᴍ Wɪɴɴᴇʀ Sᴇʟᴇᴄᴛᴇᴅ"
 
         # Card rank for tie
+        # 🔴 FIX: previously this loop computed new_streak/best_streak
+        # for the DISPLAY message using the pre-update cr["best_streak"],
+        # then separately recomputed a slightly different value for the
+        # DB write — the two could disagree, and the display used a
+        # meaningless "+1" fudge factor. Now we track the actual final
+        # values per winner and use those consistently in both places.
+        streak_display = {}
         for wid in winner_ids:
             cr = await get_card_rank(wid)
             new_streak = cr["streak"] + 1
+            final_best = max(cr["best_streak"], new_streak)
             await update_card_rank(wid,
                 wins=cr["wins"]+1, won_amount=cr["won_amount"]+prize_each,
                 streak=new_streak,
-                best_streak=max(cr["best_streak"], new_streak)
+                best_streak=final_best
             )
+            streak_display[wid] = (new_streak, final_best)
 
         # Build result message
         winner_name = p1_name if (winner_ids[0] if len(winner_ids)==1 else 0) == p1_id else p2_name
@@ -428,25 +592,37 @@ async def _end_game(q, context, gid, p1_name, p2_name, p1c, p1v, p2c, p2v, rw_te
         else:
             winner_display = f"👑 {winner_name}"
 
+        # Streak line: show each winner's actual current/best streak
+        # rather than a single potentially-misleading "N/A".
+        if streak_display:
+            streak_line = ", ".join(f"{s}/{b}" for s, b in streak_display.values())
+        else:
+            streak_line = "N/A"
+
+        fee_note = f" (🎿 {CARD_FEE_PERCENT}% Fee)" if fee_applied > 0 else " (💓 No Fee)"
         result_text = (
             f"{tie_result_text}\n\n"
             f"👑 Fɪɴᴀʟ Wɪɴɴᴇʀ(ꜱ) 👑\n\n"
             f"🎿 {winner_display}\n"
             f"🎯 Pᴏɪɴᴛꜱ: {max(s1,s2)}\n"
-            f"💵 Wᴏɴ: {fmt(prize_each)} (🎿 {CARD_FEE_PERCENT}% Fee)\n"
-            f"🔥 Sᴛʀᴇᴀᴋ: N/A\n"
+            f"💵 Wᴏɴ: {fmt(prize_each)}{fee_note}\n"
+            f"🔥 Sᴛʀᴇᴀᴋ: {streak_line}\n"
             f"⚡ Xᴘ Gᴀɪɴᴇᴅ: +{CARD_XP_WIN}\n\n"
             f"👥 Mᴇᴍʙᴇʀꜱ: 👤🎿👤👤\n\n"
             f"👉 Pʟᴀʏ Aɢᴀɪɴ Uꜱɪɴɢ : /card {bet if bet else ''}"
         )
 
         try:
-            await context.bot.send_animation(
-                game["chat_id"],
-                animation=GIFS["card_tie"],
-                caption=result_text,
-                parse_mode="HTML"
-            )
+            tie_gif = await get_gif_for_mood("card_tie")
+            if tie_gif:
+                await context.bot.send_animation(
+                    game["chat_id"],
+                    animation=tie_gif,
+                    caption=result_text,
+                    parse_mode="HTML"
+                )
+            else:
+                await context.bot.send_message(game["chat_id"], result_text, parse_mode="HTML")
         except Exception:
             await context.bot.send_message(game["chat_id"], result_text, parse_mode="HTML")
         return
@@ -498,21 +674,14 @@ async def _end_game(q, context, gid, p1_name, p2_name, p1c, p1v, p2c, p2v, rw_te
         f"👉 Pʟᴀʏ Aɢᴀɪɴ Uꜱɪɴɢ : /card {bet if bet else ''}"
     )
 
-    try:
-        await context.bot.send_animation(
-            game["chat_id"],
-            animation=GIFS["card_win"],
-            caption=result_text,
-            parse_mode="HTML"
-        )
-    except Exception:
-        await context.bot.send_message(game["chat_id"], result_text, parse_mode="HTML")
+    await _announce_final_winner(context, game["chat_id"], winner_id, result_text)
 
 
 # ═══════════════════════════════════════════════════════
 #  BOMB GAME
 # ═══════════════════════════════════════════════════════
 
+@games_gate
 async def bomb_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user; chat = update.effective_chat
     if chat.type == "private":
@@ -551,7 +720,9 @@ async def bomb_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 try:
                     c = await context.bot.get_chat(pid)
                     names.append(c.first_name)
-                except: names.append(str(pid))
+                except Exception as e:
+                    logger.debug(f"Suppressed error in games.py: {e}")
+                    names.append(str(pid))
             kb = InlineKeyboardMarkup([[
                 InlineKeyboardButton("💣 Pass Bomb!", callback_data=f"bomb_pass_{gid}")
             ]])
@@ -580,7 +751,9 @@ async def bomb_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             nc = await context.bot.get_chat(nxt)
             nname = nc.first_name
-        except: nname = str(nxt)
+        except Exception as e:
+            logger.debug(f"Suppressed error in games.py: {e}")
+            nname = str(nxt)
         kb = InlineKeyboardMarkup([[
             InlineKeyboardButton("💣 Pass Bomb!", callback_data=f"bomb_pass_{gid}")
         ]])
@@ -602,185 +775,33 @@ async def _bomb_explode(context, gid, chat_id):
     try:
         hc = await context.bot.get_chat(game["holder"])
         hname = hc.first_name
-    except: hname = str(game["holder"])
+    except Exception as e:
+        logger.debug(f"Suppressed error in games.py: {e}")
+        hname = str(game["holder"])
     try:
         await context.bot.send_message(
             chat_id,
             f"💥 <b>BOOM!</b>\n💀 <b>{hname}</b> got blown up! Everyone else survives! 🎉",
             parse_mode="HTML"
         )
-    except: pass
+    except Exception as e:
+        logger.debug(f"Suppressed error in games.py: {e}")
+        pass
 
 
 # ═══════════════════════════════════════════════════════
 #  BLUFF GAME
 # ═══════════════════════════════════════════════════════
 
-async def bluff_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    u = update.effective_user; chat = update.effective_chat
-    if chat.type == "private": await update.message.reply_html("🎮 Group only!"); return
-    await ensure_user(u.id, u.username or "", u.full_name)
-    gid = str(uuid.uuid4())[:8]
-    _bluff_games[gid] = {
-        "player1": u.id, "player2": 0,
-        "p1_card": random.randint(1,13), "p2_card": 0,
-        "status": "waiting", "chat_id": chat.id
-    }
-    kb = InlineKeyboardMarkup([[
-        InlineKeyboardButton("🎭 Join Bluff!", callback_data=f"bluff_join_{gid}"),
-        InlineKeyboardButton("❌ Cancel", callback_data=f"bluff_cancel_{gid}"),
-    ]])
-    await update.message.reply_html(
-        f"🎭 <b>Bluff Game!</b>\nHost: {mention(u)}\n\nEach player gets a secret card!\nWaiting...",
-        reply_markup=kb
-    )
+# ── (Bluff game moved to handlers/bluff_game.py — /bluff /enter /drop /judge) ──
 
 
-async def bluff_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query; u = q.from_user; await q.answer()
-    if q.data.startswith("bluff_join_"):
-        gid  = q.data[len("bluff_join_"):]
-        game = _bluff_games.get(gid)
-        if not game or game["status"] != "waiting": await q.edit_message_text("❌ Game gone!"); return
-        if game["player1"] == u.id: await q.answer("You created this!", show_alert=True); return
-        game["player2"] = u.id; game["p2_card"] = random.randint(1,13); game["status"] = "playing"
-        p1 = await context.bot.get_chat(game["player1"])
-        kb = InlineKeyboardMarkup([[
-            InlineKeyboardButton("✅ Reveal", callback_data=f"bluff_reveal_{gid}"),
-            InlineKeyboardButton("🤥 Bluff!",  callback_data=f"bluff_bluff_{gid}"),
-        ]])
-        await q.edit_message_text(
-            f"🎭 <b>Bluff Game!</b>\n{p1.first_name} vs {u.first_name}\n\nCards dealt! Reveal or Bluff?",
-            parse_mode="HTML", reply_markup=kb
-        )
-    elif q.data.startswith("bluff_reveal_") or q.data.startswith("bluff_bluff_"):
-        action = "reveal" if "reveal" in q.data else "bluff"
-        gid    = q.data.split(f"bluff_{action}_")[1]
-        game   = _bluff_games.pop(gid, None)
-        if not game: return
-        p1 = await context.bot.get_chat(game["player1"])
-        p2 = await context.bot.get_chat(game["player2"])
-        if action == "reveal":
-            winner = p1 if game["p1_card"]>game["p2_card"] else p2
-            await q.edit_message_text(
-                f"🎭 Reveal!\n{p1.first_name}: {game['p1_card']} | {p2.first_name}: {game['p2_card']}\n🏆 Winner: <b>{winner.first_name}</b>!",
-                parse_mode="HTML"
-            )
-        else:
-            win = random.random() < 0.5
-            if win:
-                await q.edit_message_text(f"🤥 Bluff success! {u.first_name} wins!", parse_mode="HTML")
-            else:
-                other = p1 if u.id==game["player2"] else p2
-                await q.edit_message_text(f"🚫 Bluff caught! {other.first_name} wins!", parse_mode="HTML")
-    elif q.data.startswith("bluff_cancel_"):
-        gid = q.data[len("bluff_cancel_"):]
-        _bluff_games.pop(gid, None)
-        await q.edit_message_text("❌ Cancelled!")
+# ── (Password Hacking game moved to handlers/hack_game.py — /hack /register /guess /end) ──
+
+# ── wordgame only (ludo moved to handlers/ludo.py) ───────────────────────────
 
 
-# ═══════════════════════════════════════════════════════
-#  HACK GAME
-# ═══════════════════════════════════════════════════════
-
-async def hack_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    u = update.effective_user
-    await ensure_user(u.id, u.username or "", u.full_name)
-    gid    = str(uuid.uuid4())[:8]
-    secret = random.randint(1000, 9999)
-    reward = random.randint(500, 3000)
-    _hack_games[gid] = {"player": u.id, "secret": secret, "attempts": 0, "max": 5, "reward": reward}
-    context.chat_data[f"hack_{gid}"] = ""
-    await update.message.reply_html(
-        f"💻 <b>Hack The System!</b>\n{mention(u)}\n\nGuess the 4-digit code!\n"
-        f"Attempts: 0/5 | 💰 Reward: {fmt(reward)}\n\nInput: <code>____</code>",
-        reply_markup=_hack_kb(gid)
-    )
-
-
-def _hack_kb(gid):
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("1️⃣",callback_data=f"hack_d_{gid}_1"),
-         InlineKeyboardButton("2️⃣",callback_data=f"hack_d_{gid}_2"),
-         InlineKeyboardButton("3️⃣",callback_data=f"hack_d_{gid}_3"),
-         InlineKeyboardButton("4️⃣",callback_data=f"hack_d_{gid}_4")],
-        [InlineKeyboardButton("5️⃣",callback_data=f"hack_d_{gid}_5"),
-         InlineKeyboardButton("6️⃣",callback_data=f"hack_d_{gid}_6"),
-         InlineKeyboardButton("7️⃣",callback_data=f"hack_d_{gid}_7"),
-         InlineKeyboardButton("8️⃣",callback_data=f"hack_d_{gid}_8")],
-        [InlineKeyboardButton("9️⃣",callback_data=f"hack_d_{gid}_9"),
-         InlineKeyboardButton("0️⃣",callback_data=f"hack_d_{gid}_0"),
-         InlineKeyboardButton("⌫", callback_data=f"hack_del_{gid}"),
-         InlineKeyboardButton("✅ Enter",callback_data=f"hack_sub_{gid}")],
-    ])
-
-
-async def hack_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query; u = q.from_user; await q.answer()
-    parts = q.data.split("_")
-
-    if q.data.startswith("hack_d_"):
-        # hack_d_<gid>_<digit>
-        digit = parts[-1]; gid = "_".join(parts[2:-1])
-        game  = _hack_games.get(gid)
-        if not game or game["player"] != u.id: return
-        cur = context.chat_data.get(f"hack_{gid}", "")
-        if len(cur) < 4: cur += digit
-        context.chat_data[f"hack_{gid}"] = cur
-        display = cur.ljust(4,"_")
-        await q.edit_message_text(
-            f"💻 <b>Hack The System!</b>\nAttempts: {game['attempts']}/5 | 💰 {fmt(game['reward'])}\n"
-            f"Input: <code>{display}</code>",
-            parse_mode="HTML", reply_markup=_hack_kb(gid)
-        )
-    elif q.data.startswith("hack_del_"):
-        gid = q.data[len("hack_del_"):]
-        game = _hack_games.get(gid)
-        if not game or game["player"] != u.id: return
-        cur = context.chat_data.get(f"hack_{gid}", "")[:-1]
-        context.chat_data[f"hack_{gid}"] = cur
-        await q.edit_message_text(
-            f"💻 <b>Hack The System!</b>\nInput: <code>{cur.ljust(4,'_')}</code>",
-            parse_mode="HTML", reply_markup=_hack_kb(gid)
-        )
-    elif q.data.startswith("hack_sub_"):
-        gid = q.data[len("hack_sub_"):]
-        game = _hack_games.get(gid)
-        if not game or game["player"] != u.id: return
-        cur = context.chat_data.get(f"hack_{gid}", "")
-        if len(cur) != 4: await q.answer("Enter 4 digits!", show_alert=True); return
-        guess = int(cur); secret = game["secret"]; game["attempts"] += 1
-        context.chat_data[f"hack_{gid}"] = ""
-        if guess == secret:
-            _hack_games.pop(gid)
-            await add_balance(u.id, game["reward"])
-            await q.edit_message_text(
-                f"💻 ✅ <b>HACKED!</b>\nCode: {secret}\nAttempts: {game['attempts']}\n💰 +{fmt(game['reward'])}",
-                parse_mode="HTML"
-            )
-        elif game["attempts"] >= game["max"]:
-            _hack_games.pop(gid)
-            await q.edit_message_text(
-                f"💻 ❌ <b>FAILED!</b>\nCode was: <b>{secret}</b>",
-                parse_mode="HTML"
-            )
-        else:
-            hint = sum(1 for a,b in zip(str(guess).zfill(4),str(secret).zfill(4)) if a==b)
-            await q.edit_message_text(
-                f"💻 ❌ Wrong! Hint: <b>{hint}/4</b> digits correct\n"
-                f"Attempts: {game['attempts']}/5 | Input: <code>____</code>",
-                parse_mode="HTML", reply_markup=_hack_kb(gid)
-            )
-
-
-# ── ludo / wordgame ────────────────────────────────────────────────────────────
-
-async def ludo_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.type == "private":
-        await update.message.reply_html("Yᴏᴜ Cᴀɴ Pʟᴀʏ Tʜᴇ Lᴜᴅᴏ Gᴀᴍᴇ Iɴ Gʀᴏᴜᴘ Oɴʟʏ."); return
-    await update.message.reply_html("🎲 Ludo mini app coming soon! Stay tuned 👀")
-
-
+@games_gate
 async def wordgame_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user; chat = update.effective_chat
     await ensure_user(u.id, u.username or "", u.full_name)
@@ -824,3 +845,67 @@ async def wordgame_letter_handler(update: Update, context: ContextTypes.DEFAULT_
             await update.message.reply_html(
                 f"❌ '{text}' not in word!\n<code>{' '.join(masked)}</code>\nAttempts: {game['attempts']}"
             )
+
+
+# ── /dice ────────────────────────────────────────────────────────────────────
+_DICE_FACES = {1: "⚀", 2: "⚁", 3: "⚂", 4: "⚃", 5: "⚄", 6: "⚅"}
+
+@games_gate
+async def dice_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /dice <amount> — roll a die against Iota's die.
+    Higher roll wins 2x your bet (5% fee for non-premium, premium exempt),
+    a tie pushes (your bet is returned), a lower roll loses the bet.
+    """
+    u = update.effective_user
+    chat = update.effective_chat
+    if chat.type == "private":
+        await update.message.reply_html("🎲 Yᴏᴜ Cᴀɴ Pʟᴀʏ Dɪᴄᴇ Iɴ Gʀᴏᴜᴘ Oɴʟʏ."); return
+    if not context.args:
+        await update.message.reply_html(
+            f"❌ {sc('Usage')}: /dice {placeholder('amount')}\n"
+            f"{sc('Bet range')}: {fmt(CARD_MIN_BET)} – {fmt(CARD_MAX_BET)}"
+        ); return
+    try:
+        amount = int(context.args[0])
+    except ValueError:
+        await update.message.reply_html("❌ Invalid amount! Bet must be a whole number."); return
+    if amount < CARD_MIN_BET:
+        await update.message.reply_html(f"❌ {sc('Minimum bet is')} {fmt(CARD_MIN_BET)}!"); return
+    if amount > CARD_MAX_BET:
+        await update.message.reply_html(f"❌ {sc('Maximum bet is')} {fmt(CARD_MAX_BET)}!"); return
+
+    await ensure_user(u.id, u.username or "", u.full_name)
+    d = await get_user(u.id)
+    if d["balance"] < amount:
+        await update.message.reply_html(
+            f"❌ {sc('Need')} {fmt(amount)}, {sc('you have')} {fmt(d['balance'])}"
+        ); return
+
+    await deduct_balance(u.id, amount)
+    p = random.randint(1, 6)
+    b = random.randint(1, 6)
+
+    if p > b:
+        winnings = amount
+        if not d.get("is_premium"):
+            winnings = int(winnings * (100 - CARD_FEE_PERCENT) / 100)
+        await add_balance(u.id, amount + winnings)
+        await update.message.reply_html(
+            f"🎲 {mention(u)}\n"
+            f"{sc('You')}: {_DICE_FACES[p]}   {sc('Iota')}: {_DICE_FACES[b]}\n"
+            f"🏆 {sc('You Win')}!  💰 +{fmt(winnings)}"
+        )
+    elif p == b:
+        await add_balance(u.id, amount)
+        await update.message.reply_html(
+            f"🎲 {mention(u)}\n"
+            f"{sc('You')}: {_DICE_FACES[p]}   {sc('Iota')}: {_DICE_FACES[b]}\n"
+            f"🤝 {sc('Tie')}! {sc('Bet returned')} {fmt(amount)}"
+        )
+    else:
+        await update.message.reply_html(
+            f"🎲 {mention(u)}\n"
+            f"{sc('You')}: {_DICE_FACES[p]}   {sc('Iota')}: {_DICE_FACES[b]}\n"
+            f"💀 {sc('You Lose')}!  💰 -{fmt(amount)}"
+        )

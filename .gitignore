@@ -1,0 +1,14 @@
+# ── Python caches ─────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+
+# ── Secrets / local config (keep local only) ─────────────────
+config.py
+
+# ── Packed / backup artifacts ────────────────────────────────
+*.zip
+iota_old_backup_*/
+
+# ── Local bug-report scratch files ───────────────────────────
+BUG_REPORT*.md

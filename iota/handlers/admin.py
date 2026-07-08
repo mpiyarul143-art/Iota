@@ -1,7 +1,7 @@
 """
 Iota Admin Handler
 . or ! prefix commands
-Baka-style promote levels with titles
+Iota-style promote levels with titles
 """
 import re, time
 from telegram import Update, ChatPermissions, ChatAdministratorRights
@@ -9,21 +9,29 @@ from telegram.ext import ContextTypes
 from telegram.error import TelegramError
 from utils.mongo_db import (add_warning, get_warnings, remove_last_warning,
                              count_warnings, track_promotion,
-                             get_bot_promotions, remove_promotion)
-from utils.helpers import ts, mention, parse_duration, is_admin
+                             get_bot_promotions, remove_promotion,
+                             get_user_by_username)
+from utils.helpers import ts, mention, parse_duration, is_admin, promote_with_rights
+from utils.safe_html import safe_html
 from utils.fonts import sc
+from config import OWNER_ID
 
 PROMOTE_TITLES = {
-    "0": ("🥇", "Junior Admin",  {"can_manage_chat": True}),
-    "1": ("🥈", "Admin",         {"can_manage_chat": True, "can_delete_messages": True,
-                                   "can_restrict_members": True, "can_invite_users": True}),
-    "2": ("🥉", "Senior Admin",  {"can_manage_chat": True, "can_delete_messages": True,
-                                   "can_restrict_members": True, "can_invite_users": True,
-                                   "can_pin_messages": True, "can_change_info": True}),
-    "3": ("🏅", "Full Admin",    {"can_manage_chat": True, "can_delete_messages": True,
-                                   "can_restrict_members": True, "can_invite_users": True,
-                                   "can_pin_messages": True, "can_change_info": True,
-                                   "can_promote_members": True}),
+    "1": ("🥉", "Junior Admin", {"can_delete_messages": True,
+                                  "can_restrict_members": True}),
+    "2": ("🥈", "Admin",        {"can_delete_messages": True,
+                                  "can_restrict_members": True,
+                                  "can_invite_users": True,
+                                  "can_pin_messages": True,
+                                  "can_change_info": True}),
+    "3": ("🥇", "Full Admin",   {"can_delete_messages": True,
+                                  "can_restrict_members": True,
+                                  "can_invite_users": True,
+                                  "can_pin_messages": True,
+                                  "can_change_info": True,
+                                  "can_promote_members": True,
+                                  "can_manage_chat": True,
+                                  "can_manage_video_chats": True}),
 }
 
 POWER_MAP = {
@@ -41,11 +49,22 @@ async def dot_admin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cmd  = m.group(1).lower()
     rest = m.group(2).strip()
     if cmd == "help": await _help(update); return
+    if cmd == "report":
+        await _report(update, context, rest); return
     if cmd == "imute":
-        if not await is_admin(update, context):
+        if not await is_admin(update, context) and update.effective_user.id != OWNER_ID:
             await msg.reply_html("❌ Admins only!"); return
         await _imute(update, context, rest); return
-    if not await is_admin(update, context):
+
+    # 🆕 OWNER BYPASS: the bot owner can run ANY dot-admin command in ANY
+    # group Iota is in — including .promote at any level — even if the
+    # owner themselves isn't an admin there. This only works if Iota
+    # herself already has admin rights with promote permission in that
+    # group; if she doesn't, Telegram's own API will reject the actual
+    # promote_chat_member call below with a clear TelegramError, so this
+    # bypass can never grant more power than the bot actually has.
+    is_owner_call = update.effective_user.id == OWNER_ID
+    if not is_owner_call and not await is_admin(update, context):
         await msg.reply_html("❌ Admins only!"); return
     dispatch = {
         "warn":      _warn,
@@ -60,6 +79,7 @@ async def dot_admin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "kick":      _kick,
         "promote":   _promote,
         "demote":    _demote,
+        "unpromote": _demote,          # 🆕 alias — ".unpromote" now works
         "demote_all":lambda u,c,r: _demote_all(u,c),
         "add":       _add_power,
         "remove":    _remove_power,
@@ -67,11 +87,41 @@ async def dot_admin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "pin":       lambda u,c,r: _pin(u,c),
         "unpin":     lambda u,c,r: _unpin(u,c),
         "d":         lambda u,c,r: _delete(u,c),
+        # ── 🆕 10 New Admin Commands ─────────────────────────────────────────
+        "adminlist": lambda u,c,r: _adminlist(u,c),
+        "report":    _report,
+        "clearwarn": _clearwarn,
+        "warnlimit": _warnlimit,
+        "tmute":     _tmute,
+        "tban":      _tban,
+        "note":      _note,
+        "notes":     lambda u,c,r: _notes(u,c),
+        "delnote":   _delnote,
+        "clearnotes":lambda u,c,r: _clearnotes(u,c),
+        "purge":     _purge,
     }
     fn = dispatch.get(cmd)
     if fn: await fn(update, context, rest)
 
 async def _resolve(update, context, rest: str):
+    """
+    Resolve the target user from a reply or a "@username"/"id" argument.
+
+    🔴 FIX: Previously, for a bare @username (not a reply), this ONLY
+    tried context.bot.get_chat(f"@{t}") and gave up entirely if it
+    failed — returning (None, None, extra), which every caller shows as
+    "❌ Specify a user!". get_chat("@username") fails very often in
+    practice (Telegram hasn't cached that username yet, the user has
+    strict privacy settings, or it's simply a transient API hiccup),
+    even though the user is completely real and known to this bot.
+    This is exactly the bug behind ".unmute @Boobies_007" failing while
+    a reply-based unmute works fine.
+
+    Now falls back to the bot's own MongoDB user records (populated by
+    ensure_user() on every message) when get_chat fails, so admin
+    commands work reliably by @username even when Telegram's own
+    lookup doesn't cooperate.
+    """
     msg = update.effective_message; parts = rest.split()
     if msg.reply_to_message and msg.reply_to_message.from_user:
         u = msg.reply_to_message.from_user
@@ -90,7 +140,18 @@ async def _resolve(update, context, rest: str):
             ch = await context.bot.get_chat(f"@{t}")
             return ch.id, f'<a href="tg://user?id={ch.id}">{ch.first_name}</a>', extra
         except Exception:
-            return None, None, extra
+            pass
+        # Fallback: look the username up in our own DB (works even when
+        # Telegram's get_chat can't resolve it).
+        try:
+            u = await get_user_by_username(t)
+            if u:
+                uid = u["_id"]
+                name = u.get("full_name") or u.get("username") or f"User {uid}"
+                return uid, f'<a href="tg://user?id={uid}">{name}</a>', extra
+        except Exception:
+            pass
+        return None, None, extra
 
 async def _warn(update, context, rest):
     msg = update.effective_message; chat = update.effective_chat
@@ -99,14 +160,16 @@ async def _warn(update, context, rest):
     reason = " ".join(extra) or "No reason"
     await add_warning(uid, chat.id, reason, update.effective_user.id)
     count = await count_warnings(uid, chat.id)
-    if count >= 3:
+    limit = await get_warn_limit(chat.id)
+    if count >= limit:
         try:
             await context.bot.ban_chat_member(chat.id, uid)
-            await msg.reply_html(f"⛔ {uname} <b>{sc('Banned')}!</b> (3 {sc('warnings reached')})")
+            await get_db().warnings.delete_many({"user_id": uid, "chat_id": chat.id})
+            await msg.reply_html(f"⛔ {uname} <b>{sc('Banned')}!</b> ({count} {sc('warnings reached')})")
         except TelegramError as e:
-            await msg.reply_html(f"❌ {e}")
+            await msg.reply_html(f"❌ {safe_html(e)}")
     else:
-        await msg.reply_html(f"⚠️ {uname} {sc('Warned!')} (<b>{count}/3</b>)\n{sc('Reason')}: {reason}")
+        await msg.reply_html(f"⚠️ {uname} {sc('Warned!')} (<b>{count}/{limit}</b>)\n{sc('Reason')}: {safe_html(reason)}")
 
 async def _unwarn(update, context, rest):
     msg = update.effective_message; chat = update.effective_chat
@@ -127,7 +190,7 @@ async def _warns(update, context, rest):
     text = f"⚠️ <b>{sc('Warnings for')} {uname}:</b>\n\n"
     for i, w in enumerate(rows, 1):
         t = time.strftime("%d/%m/%Y", time.localtime(w.get("warned_at",0)))
-        text += f"{i}. {w.get('reason','?')} ({t})\n"
+        text += f"{i}. {safe_html(w.get('reason','?'))} ({t})\n"
     await msg.reply_html(text)
 
 async def _mute(update, context, rest, delete=False):
@@ -150,7 +213,7 @@ async def _mute(update, context, rest, delete=False):
             await context.bot.restrict_chat_member(chat.id, uid, perms)
             await msg.reply_html(f"🔇 {uname} {sc('Muted Permanently')}!")
     except TelegramError as e:
-        await msg.reply_html(f"❌ {e}")
+        await msg.reply_html(f"❌ {safe_html(e)}")
 
 async def _imute(update, context, rest):
     """Mute media only (images, stickers, GIFs)."""
@@ -161,7 +224,12 @@ async def _imute(update, context, rest):
     secs = parse_duration(dur_str)
     perms = ChatPermissions(
         can_send_messages=True,
-        can_send_media_messages=False,
+        can_send_photos=False,
+        can_send_videos=False,
+        can_send_audios=False,
+        can_send_documents=False,
+        can_send_video_notes=False,
+        can_send_voice_notes=False,
         can_send_polls=False,
         can_send_other_messages=False,
         can_add_web_page_previews=False,
@@ -176,14 +244,16 @@ async def _imute(update, context, rest):
             await context.bot.restrict_chat_member(chat.id, uid, perms)
             await msg.reply_html(f"🖼️ {uname} {sc('Media Muted Permanently')}!")
     except TelegramError as e:
-        await msg.reply_html(f"❌ {e}")
+        await msg.reply_html(f"❌ {safe_html(e)}")
 
 async def _unmute(update, context, rest):
     msg = update.effective_message; chat = update.effective_chat
     uid, uname, _ = await _resolve(update, context, rest)
     if not uid: await msg.reply_html("❌ Specify a user!"); return
     perms = ChatPermissions(
-        can_send_messages=True, can_send_media_messages=True,
+        can_send_messages=True,
+        can_send_photos=True, can_send_videos=True, can_send_audios=True,
+        can_send_documents=True, can_send_video_notes=True, can_send_voice_notes=True,
         can_send_polls=True, can_send_other_messages=True,
         can_add_web_page_previews=True, can_invite_users=True
     )
@@ -191,7 +261,7 @@ async def _unmute(update, context, rest):
         await context.bot.restrict_chat_member(chat.id, uid, perms)
         await msg.reply_html(f"🔊 {uname} {sc('Unmuted')}!")
     except TelegramError as e:
-        await msg.reply_html(f"❌ {e}")
+        await msg.reply_html(f"❌ {safe_html(e)}")
 
 async def _ban(update, context, rest, delete=False):
     msg = update.effective_message; chat = update.effective_chat
@@ -203,9 +273,9 @@ async def _ban(update, context, rest, delete=False):
     reason = " ".join(extra) or "No reason"
     try:
         await context.bot.ban_chat_member(chat.id, uid)
-        await msg.reply_html(f"⛔ {uname} <b>{sc('Banned')}!</b>\n{sc('Reason')}: {reason}")
+        await msg.reply_html(f"⛔ {uname} <b>{sc('Banned')}!</b>\n{sc('Reason')}: {safe_html(reason)}")
     except TelegramError as e:
-        await msg.reply_html(f"❌ {e}")
+        await msg.reply_html(f"❌ {safe_html(e)}")
 
 async def _unban(update, context, rest):
     msg = update.effective_message; chat = update.effective_chat
@@ -215,7 +285,7 @@ async def _unban(update, context, rest):
         await context.bot.unban_chat_member(chat.id, uid, only_if_banned=True)
         await msg.reply_html(f"✅ {uname} <b>{sc('Unbanned')}!</b>")
     except TelegramError as e:
-        await msg.reply_html(f"❌ {e}")
+        await msg.reply_html(f"❌ {safe_html(e)}")
 
 async def _kick(update, context, rest):
     msg = update.effective_message; chat = update.effective_chat
@@ -226,7 +296,74 @@ async def _kick(update, context, rest):
         await context.bot.unban_chat_member(chat.id, uid)
         await msg.reply_html(f"👢 {uname} <b>{sc('Kicked')}!</b>")
     except TelegramError as e:
-        await msg.reply_html(f"❌ {e}")
+        await msg.reply_html(f"❌ {safe_html(e)}")
+
+def _build_rights(**overrides) -> ChatAdministratorRights:
+    """
+    🔴 FIX: ChatAdministratorRights requires ALL of these fields to be
+    explicitly passed (is_anonymous, can_manage_chat, can_delete_messages,
+    can_manage_video_chats, can_restrict_members, can_promote_members,
+    can_change_info, can_invite_users) — none of them have a default
+    value in python-telegram-bot. Every single call site in this file
+    was only passing a partial dict (e.g. just {"can_manage_chat": True}),
+    which raises `TypeError: missing N required positional arguments`
+    on EVERY .promote/.demote/.add/.remove call — an uncaught TypeError
+    (not a TelegramError, so the existing `except TelegramError` never
+    catches it), meaning the command just silently did nothing at all.
+    This helper fills every required field with a safe False default,
+    then applies whatever specific rights the caller wants on top.
+    """
+    base = dict(
+        is_anonymous=False, can_manage_chat=False, can_delete_messages=False,
+        can_manage_video_chats=False, can_restrict_members=False,
+        can_promote_members=False, can_change_info=False, can_invite_users=False,
+        can_post_messages=False, can_edit_messages=False, can_pin_messages=False,
+        can_post_stories=False, can_edit_stories=False, can_delete_stories=False,
+    )
+    base.update(overrides)
+    return ChatAdministratorRights(**base)
+
+
+async def _bot_rights(context, chat):
+    """Return the bot's own chat-member object (has can_* rights directly
+    in this PTB version) so we can avoid granting rights it lacks."""
+    try:
+        return await context.bot.get_chat_member(chat.id, context.bot.id)
+    except Exception:
+        return None
+
+_RIGHT_ATTRS = (
+    "is_anonymous", "can_manage_chat", "can_delete_messages",
+    "can_manage_video_chats", "can_restrict_members", "can_promote_members",
+    "can_change_info", "can_invite_users", "can_post_messages",
+    "can_edit_messages", "can_pin_messages", "can_post_stories",
+    "can_edit_stories", "can_delete_stories", "can_manage_topics",
+)
+
+def _cap_rights(rights, my_rights):
+    """
+    Drop any right the BOT itself cannot grant. Telegram raises
+    Right_forbidden if you try to promote someone with a permission the
+    bot account doesn't have — e.g. Full Admin's can_promote_members, or
+    Admin's can_manage_chat. Capping to the bot's actual powers avoids
+    that hard error and still grants everything the bot is allowed to.
+    Returns (new ChatAdministratorRights, dropped: bool).
+
+    ChatAdministratorRights is immutable, so we build a NEW object.
+    """
+    if my_rights is None:
+        return rights, False
+    dropped = False
+    kw = {}
+    for a in _RIGHT_ATTRS:
+        val = getattr(rights, a)
+        if val and not getattr(my_rights, a, False):
+            kw[a] = False
+            dropped = True
+        else:
+            kw[a] = val
+    return ChatAdministratorRights(**kw), dropped
+
 
 async def _promote(update, context, rest):
     msg = update.effective_message; chat = update.effective_chat
@@ -236,47 +373,43 @@ async def _promote(update, context, rest):
     info  = PROMOTE_TITLES.get(level, PROMOTE_TITLES["1"])
     medal, title_name, rights_kw = info
     try:
-        rights = ChatAdministratorRights(**rights_kw)
-        await context.bot.promote_chat_member(chat.id, uid, rights=rights)
+        my = await _bot_rights(context, chat)
+        rights = _build_rights(**rights_kw)
+        rights, dropped = _cap_rights(rights, my)
+        await promote_with_rights(context.bot, chat.id, uid, rights)
         try:
             await context.bot.set_chat_administrator_custom_title(chat.id, uid, title_name)
         except Exception: pass
         await track_promotion(uid, chat.id, update.effective_user.id)
-        await msg.reply_html(
-            f"{uname} {sc('Promoted To')} {medal} {sc(title_name)}."
-        )
+        out = f"{uname} {sc('Promoted To')} {medal} {sc(title_name)}."
+        if dropped:
+            out += f"\n⚠️ {sc('Some rights skipped — I lack permission')}"
+        await msg.reply_html(out)
     except TelegramError as e:
-        await msg.reply_html(f"❌ {e}")
+        await msg.reply_html(f"❌ {safe_html(e)}")
+        await msg.reply_html(f"❌ {safe_html(e)}")
 
 async def _demote(update, context, rest):
     msg = update.effective_message; chat = update.effective_chat
     uid, uname, _ = await _resolve(update, context, rest)
     if not uid: await msg.reply_html("❌ Specify a user!"); return
-    rights = ChatAdministratorRights(
-        can_manage_chat=False, can_delete_messages=False,
-        can_restrict_members=False, can_invite_users=False,
-        can_pin_messages=False, can_change_info=False, can_promote_members=False
-    )
+    rights = _build_rights()
     try:
-        await context.bot.promote_chat_member(chat.id, uid, rights=rights)
+        await promote_with_rights(context.bot, chat.id, uid, rights)
         await remove_promotion(uid, chat.id)
         await msg.reply_html(f"⬇️ {uname} <b>{sc('Demoted')}!</b>")
     except TelegramError as e:
-        await msg.reply_html(f"❌ {e}")
+        await msg.reply_html(f"❌ {safe_html(e)}")
 
 async def _demote_all(update, context):
     msg = update.effective_message; chat = update.effective_chat
     rows = await get_bot_promotions(chat.id)
     if not rows: await msg.reply_html(f"❓ {sc('No tracked promotions!')}"); return
-    rights = ChatAdministratorRights(
-        can_manage_chat=False, can_delete_messages=False,
-        can_restrict_members=False, can_invite_users=False,
-        can_pin_messages=False, can_change_info=False, can_promote_members=False
-    )
+    rights = _build_rights()
     done = 0
     for r in rows:
         try:
-            await context.bot.promote_chat_member(chat.id, r["user_id"], rights=rights)
+            await promote_with_rights(context.bot, chat.id, r["user_id"], rights)
             await remove_promotion(r["user_id"], chat.id); done += 1
         except Exception: pass
     await msg.reply_html(f"✅ {sc('Demoted')} <b>{done}</b> {sc('admins')}.")
@@ -285,29 +418,86 @@ async def _add_power(update, context, rest):
     msg = update.effective_message; chat = update.effective_chat
     uid, uname, extra = await _resolve(update, context, rest)
     if not uid or not extra:
-        await msg.reply_html(f"❌ {sc('Usage')}: .add [user] <power>\n{sc('Powers')}: {' | '.join(POWER_MAP.keys())}"); return
+        await msg.reply_html(f"❌ {sc('Usage')}: .add [user] &lt;power&gt;\n{sc('Powers')}: {' | '.join(POWER_MAP.keys())}"); return
     perm = POWER_MAP.get(extra[0].lower())
     if not perm: await msg.reply_html(f"❌ {sc('Unknown power!')}"); return
     try:
-        rights = ChatAdministratorRights(**{perm: True, "can_manage_chat": True})
-        await context.bot.promote_chat_member(chat.id, uid, rights=rights)
-        await msg.reply_html(f"✅ {sc('Added')} <b>{extra[0]}</b> {sc('power to')} {uname}!")
+        cm = await context.bot.get_chat_member(chat.id, uid)
+        my = await _bot_rights(context, chat)
+        rights = _build_rights(
+            can_manage_chat=True,
+            can_delete_messages=bool(cm.can_delete_messages),
+            can_restrict_members=bool(cm.can_restrict_members),
+            can_invite_users=bool(cm.can_invite_users),
+            can_pin_messages=bool(cm.can_pin_messages),
+            can_change_info=bool(cm.can_change_info),
+            can_promote_members=bool(cm.can_promote_members),
+            can_manage_video_chats=bool(cm.can_manage_video_chats),
+            **{perm: True},
+        )
+        rights, dropped = _cap_rights(rights, my)
+        await promote_with_rights(context.bot, chat.id, uid, rights)
+        out = f"✅ {sc('Added')} <b>{extra[0]}</b> {sc('power to')} {uname}!"
+        if dropped:
+            out += f"\n⚠️ {sc('Some rights skipped — I lack permission')}"
+        await msg.reply_html(out)
     except TelegramError as e:
-        await msg.reply_html(f"❌ {e}")
+        await msg.reply_html(f"❌ {safe_html(e)}")
 
 async def _remove_power(update, context, rest):
     msg = update.effective_message; chat = update.effective_chat
     uid, uname, extra = await _resolve(update, context, rest)
     if not uid or not extra:
-        await msg.reply_html(f"❌ {sc('Usage')}: .remove [user] <power>"); return
+        await msg.reply_html(f"❌ {sc('Usage')}: .remove [user] &lt;power&gt;"); return
     perm = POWER_MAP.get(extra[0].lower())
     if not perm: await msg.reply_html(f"❌ {sc('Unknown power!')}"); return
     try:
-        rights = ChatAdministratorRights(**{perm: False, "can_manage_chat": True})
-        await context.bot.promote_chat_member(chat.id, uid, rights=rights)
+        cm = await context.bot.get_chat_member(chat.id, uid)
+        my = await _bot_rights(context, chat)
+        rights = _build_rights(
+            can_manage_chat=True,
+            can_delete_messages=bool(cm.can_delete_messages),
+            can_restrict_members=bool(cm.can_restrict_members),
+            can_invite_users=bool(cm.can_invite_users),
+            can_pin_messages=bool(cm.can_pin_messages),
+            can_change_info=bool(cm.can_change_info),
+            can_promote_members=bool(cm.can_promote_members),
+            can_manage_video_chats=bool(cm.can_manage_video_chats),
+            **{perm: False},
+        )
+        rights, dropped = _cap_rights(rights, my)
+        await promote_with_rights(context.bot, chat.id, uid, rights)
+        out = f"✅ {sc('Removed')} <b>{extra[0]}</b> {sc('from')} {uname}!"
+        if dropped:
+            out += f"\n⚠️ {sc('Some rights skipped — I lack permission')}"
+        await msg.reply_html(out)
+    except TelegramError as e:
+        await msg.reply_html(f"❌ {safe_html(e)}")
+
+async def _remove_power(update, context, rest):
+    msg = update.effective_message; chat = update.effective_chat
+    uid, uname, extra = await _resolve(update, context, rest)
+    if not uid or not extra:
+        await msg.reply_html(f"❌ {sc('Usage')}: .remove [user] &lt;power&gt;"); return
+    perm = POWER_MAP.get(extra[0].lower())
+    if not perm: await msg.reply_html(f"❌ {sc('Unknown power!')}"); return
+    try:
+        cm = await context.bot.get_chat_member(chat.id, uid)
+        rights = _build_rights(
+            can_manage_chat=True,
+            can_delete_messages=bool(cm.can_delete_messages),
+            can_restrict_members=bool(cm.can_restrict_members),
+            can_invite_users=bool(cm.can_invite_users),
+            can_pin_messages=bool(cm.can_pin_messages),
+            can_change_info=bool(cm.can_change_info),
+            can_promote_members=bool(cm.can_promote_members),
+            can_manage_video_chats=bool(cm.can_manage_video_chats),
+            **{perm: False},
+        )
+        await promote_with_rights(context.bot, chat.id, uid, rights)
         await msg.reply_html(f"✅ {sc('Removed')} <b>{extra[0]}</b> {sc('from')} {uname}!")
     except TelegramError as e:
-        await msg.reply_html(f"❌ {e}")
+        await msg.reply_html(f"❌ {safe_html(e)}")
 
 async def _title(update, context, rest):
     msg = update.effective_message; chat = update.effective_chat
@@ -316,9 +506,9 @@ async def _title(update, context, rest):
     title = " ".join(extra)
     try:
         await context.bot.set_chat_administrator_custom_title(chat.id, uid, title)
-        await msg.reply_html(f"🏷️ {uname}'s {sc('title')}: <b>{title or '(none)'}</b>")
+        await msg.reply_html(f"🏷️ {uname}'s {sc('title')}: <b>{safe_html(title) or '(none)'}</b>")
     except TelegramError as e:
-        await msg.reply_html(f"❌ {e}")
+        await msg.reply_html(f"❌ {safe_html(e)}")
 
 async def _pin(update, context):
     msg = update.effective_message
@@ -328,7 +518,7 @@ async def _pin(update, context):
         await msg.reply_to_message.pin()
         await msg.reply_html(f"📌 {sc('Pinned!')}") 
     except TelegramError as e:
-        await msg.reply_html(f"❌ {e}")
+        await msg.reply_html(f"❌ {safe_html(e)}")
 
 async def _unpin(update, context):
     msg = update.effective_message
@@ -340,7 +530,7 @@ async def _unpin(update, context):
             await context.bot.unpin_chat_message(update.effective_chat.id)
         await msg.reply_html(f"📌 {sc('Unpinned!')}")
     except TelegramError as e:
-        await msg.reply_html(f"❌ {e}")
+        await msg.reply_html(f"❌ {safe_html(e)}")
 
 async def _delete(update, context):
     msg = update.effective_message
@@ -349,6 +539,39 @@ async def _delete(update, context):
         if msg.reply_to_message:
             await msg.reply_to_message.delete()
     except Exception: pass
+
+async def _purge(update, context, rest):
+    """Delete a run of recent messages. Reply to a message + .purge N
+    deletes that message and the N messages before it. Without a reply,
+    .purge N deletes the command message and the N before it."""
+    msg = update.effective_message; chat = update.effective_chat
+    parts = rest.strip().split()
+    if not parts or not parts[0].isdigit():
+        await msg.reply_html(f"❌ {sc('Usage')}: .purge &lt;count&gt;  ({sc('reply optional')})"); return
+    n = int(parts[0])
+    if n > 100:
+        await msg.reply_html(f"❌ {sc('Max')} 100 {sc('messages per purge')}!"); return
+    end_id = msg.reply_to_message.message_id if msg.reply_to_message else msg.message_id
+    start_id = max(1, end_id - n + 1)
+    deleted = 0
+    for mid in range(start_id, end_id + 1):
+        try:
+            await context.bot.delete_message(chat.id, mid)
+            deleted += 1
+        except Exception:
+            pass
+    try:
+        await msg.delete()
+    except Exception:
+        pass
+    if deleted:
+        try:
+            await context.bot.send_message(
+                chat.id, f"🧹 {sc('Purged')} {deleted} {sc('messages')}."
+            )
+        except Exception:
+            pass
+
 
 async def _help(update):
     await update.effective_message.reply_html(
@@ -364,8 +587,8 @@ async def _help(update):
         f"<code>.dban</code> [reply] — {sc('Delete + Ban')}\n"
         f"<code>.unban</code> [user] — {sc('Unban')}\n"
         f"<code>.kick</code> [user] — {sc('Kick')}\n"
-        f"<code>.promote</code> [user] 0/1/2/3\n"
-        f"  0={sc('Junior')} 1={sc('Admin')} 2={sc('Senior')} 3={sc('Full')}\n"
+        f"<code>.promote</code> [user] 1/2/3\n"
+        f"  1={sc('Junior')} 2={sc('Admin')} 3={sc('Full')}\n"
         f"<code>.demote</code> [user]\n"
         f"<code>.demote_all</code>\n"
         f"<code>.add</code> [user] power\n"
@@ -373,6 +596,197 @@ async def _help(update):
         f"<code>.title</code> [user] title\n"
         f"<code>.pin</code> [reply] — {sc('Pin')}\n"
         f"<code>.unpin</code> — {sc('Unpin')}\n"
-        f"<code>.d</code> — {sc('Delete')}\n\n"
+        f"<code>.d</code> — {sc('Delete')}\n"
+        f"<code>.purge</code> [count] — {sc('Delete a run of messages')}\n\n"
+        f"🆕 <b>{sc('New Commands')}:</b>\n"
+        f"<code>.adminlist</code> — {sc('List all admins')}\n"
+        f"<code>.report</code> [reply] — {sc('Report a user to admins')}\n"
+        f"<code>.clearwarn</code> [user] — {sc('Clear all warnings')}\n"
+        f"<code>.warnlimit</code> N — {sc('Set warn limit (default 3)')}\n"
+        f"<code>.tmute</code> [user] [time] — {sc('Timed mute with auto-unmute')}\n"
+        f"<code>.tban</code> [user] [time] — {sc('Timed ban with auto-unban')}\n"
+        f"<code>.note</code> [key] [text] — {sc('Save a note')}\n"
+        f"<code>.notes</code> — {sc('List all saved notes')}\n"
+        f"<code>.delnote</code> [key] — {sc('Delete a note')}\n"
+        f"<code>.clearnotes</code> — {sc('Clear all notes')}\n\n"
         f"{sc('Powers')}: manage|delete|restrict|invite|pin|info|promote|video"
     )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 🆕 10 New Powerful Admin Commands
+# ══════════════════════════════════════════════════════════════════════════════
+
+from utils.mongo_db import (
+    set_note, get_note, delete_note, list_notes, clear_notes,
+    get_warn_limit, set_warn_limit, get_db,
+)
+
+
+async def _adminlist(update, context):
+    """Show all current admins with their titles."""
+    chat = update.effective_chat
+    msg = update.effective_message
+    try:
+        admins = await context.bot.get_chat_administrators(chat.id)
+    except TelegramError as e:
+        await msg.reply_html(f"❌ {safe_html(e)}"); return
+
+    lines = []
+    for a in admins:
+        u = a.user
+        if u.is_bot:
+            continue
+        name = u.full_name
+        title = ""
+        if hasattr(a, "custom_title") and a.custom_title:
+            title = f" — <i>{safe_html(a.custom_title)}</i>"
+        icon = "👑" if a.status == "creator" else "⭐"
+        lines.append(f"{icon} <a href='tg://user?id={u.id}'>{safe_html(name)}</a>{title}")
+
+    await msg.reply_html(
+        f"🛡️ <b>{sc('Admin List')} — {safe_html(chat.title or 'Group')}</b>\n\n"
+        + "\n".join(lines) + f"\n\n<i>{sc('Total')}: {len(lines)}</i>"
+    )
+
+
+async def _report(update, context, rest):
+    """Reply to a message + .report to notify all admins."""
+    msg = update.effective_message; chat = update.effective_chat; u = update.effective_user
+    if not msg.reply_to_message:
+        await msg.reply_html("📢 " + sc("Reply to the message you want to report.")); return
+
+    try:
+        admins = await context.bot.get_chat_administrators(chat.id)
+    except TelegramError:
+        admins = []
+
+    # Send a ping to each admin (Telegram bots can't @mention admin
+    # lists, so we tag them all in one message as inline text links).
+    admin_tags = " ".join(
+        f'<a href="tg://user?id={a.user.id}">.</a>'
+        for a in admins if not a.user.is_bot
+    )
+    reason = rest.strip() or sc("No reason given")
+    reported = msg.reply_to_message.from_user
+    await msg.reply_html(
+        f"🚨 <b>{sc('Report')}</b>\n"
+        f"{mention(u)} {sc('reported')} {mention(reported)}\n"
+        f"📌 {sc('Reason')}: {safe_html(reason)}\n\n"
+        f"{sc('Admins pinged')}: {admin_tags}"
+    )
+
+
+async def _clearwarn(update, context, rest):
+    """Clear all warnings for a user."""
+    msg = update.effective_message
+    uid, uname, _ = await _resolve(update, context, rest)
+    if not uid:
+        await msg.reply_html("❌ Specify a user!"); return
+    chat_id = update.effective_chat.id
+    r = await get_db().warnings.delete_many({"user_id": uid, "chat_id": chat_id})
+    await msg.reply_html(f"🧹 {sc('All warnings cleared for')} {uname}! ({r.deleted_count})")
+
+
+async def _warnlimit(update, context, rest):
+    """Set max warns before auto-ban. Default is 3."""
+    msg = update.effective_message; chat = update.effective_chat
+    parts = rest.strip().split()
+    if not parts or not parts[0].isdigit():
+        lim = await get_warn_limit(chat.id)
+        await msg.reply_html(f"⚠️ {sc('Current warn limit')}: <b>{lim}</b>\n{sc('Set with')}: <code>.warnlimit 5</code>"); return
+    lim = max(1, min(20, int(parts[0])))
+    await set_warn_limit(chat.id, lim)
+    await msg.reply_html(f"✅ {sc('Warn limit set to')} <b>{lim}</b> {sc('warns before auto-ban')}.")
+
+
+async def _tmute(update, context, rest):
+    """Timed mute — auto-unmutes via Telegram's until_date parameter."""
+    msg = update.effective_message; chat = update.effective_chat
+    uid, uname, extra = await _resolve(update, context, rest)
+    if not uid:
+        await msg.reply_html("❌ Specify a user!"); return
+    dur_str = extra[0] if extra else "1h"
+    try:
+        dur = parse_duration(dur_str)
+    except Exception:
+        await msg.reply_html("❌ " + sc("Invalid time. Use 30m, 2h, 1d")); return
+    until = int(time.time() + dur)
+    try:
+        await context.bot.restrict_chat_member(
+            chat.id, uid,
+            ChatPermissions(can_send_messages=False),
+            until_date=until,
+        )
+        await msg.reply_html(
+            f"⏰ {uname} {sc('muted for')} <b>{dur_str}</b>. "
+            f"{sc('Auto-unmutes at')} {time.strftime('%H:%M', time.localtime(until))}"
+        )
+    except TelegramError as e:
+        await msg.reply_html(f"❌ {safe_html(e)}")
+
+
+async def _tban(update, context, rest):
+    """Timed ban — auto-unbans via Telegram's until_date parameter."""
+    msg = update.effective_message; chat = update.effective_chat
+    uid, uname, extra = await _resolve(update, context, rest)
+    if not uid:
+        await msg.reply_html("❌ Specify a user!"); return
+    dur_str = extra[0] if extra else "1h"
+    try:
+        dur = parse_duration(dur_str)
+    except Exception:
+        await msg.reply_html("❌ " + sc("Invalid time. Use 30m, 2h, 1d")); return
+    until = int(time.time() + dur)
+    try:
+        await context.bot.ban_chat_member(chat.id, uid, until_date=until)
+        await msg.reply_html(
+            f"⏰ {uname} {sc('banned for')} <b>{dur_str}</b>. "
+            f"{sc('Auto-unbans at')} {time.strftime('%H:%M', time.localtime(until))}"
+        )
+    except TelegramError as e:
+        await msg.reply_html(f"❌ {safe_html(e)}")
+
+
+async def _note(update, context, rest):
+    """Save a note: .note keyname The text content to save."""
+    msg = update.effective_message; chat = update.effective_chat
+    parts = rest.strip().split(None, 1)
+    if len(parts) < 2:
+        await msg.reply_html("📝 " + sc("Usage: .note <key> <text>")); return
+    key, value = parts[0].lower(), parts[1]
+    await set_note(chat.id, key, value)
+    await msg.reply_html(f"📝 {sc('Note')} <b>{safe_html(key)}</b> {sc('saved!')} {sc('Show it with')} <code>.notes</code>")
+
+
+async def _notes(update, context):
+    """List all saved notes for this group."""
+    msg = update.effective_message; chat = update.effective_chat
+    keys = await list_notes(chat.id)
+    if not keys:
+        await msg.reply_html("📝 " + sc("No notes saved. Add with: .note <key> <text>")); return
+    lines = [f"📌 <code>{safe_html(k)}</code>" for k in sorted(keys)]
+    await msg.reply_html(
+        f"📝 <b>{sc('Saved Notes')}</b> ({len(keys)}):\n\n" +
+        "\n".join(lines) + f"\n\n{sc('Get a note')}: <code>#key</code> {sc('or')} <code>/get key</code>"
+    )
+
+
+async def _delnote(update, context, rest):
+    """Delete one saved note."""
+    msg = update.effective_message; chat = update.effective_chat
+    key = rest.strip().lower()
+    if not key:
+        await msg.reply_html("❌ " + sc("Usage: .delnote <key>")); return
+    ok = await delete_note(chat.id, key)
+    if ok:
+        await msg.reply_html(f"🗑️ {sc('Note')} <b>{safe_html(key)}</b> {sc('deleted.')}")
+    else:
+        await msg.reply_html(f"❌ {sc('No note found with key')} <b>{safe_html(key)}</b>")
+
+
+async def _clearnotes(update, context):
+    """Delete ALL notes for this group."""
+    msg = update.effective_message; chat = update.effective_chat
+    n = await clear_notes(chat.id)
+    await msg.reply_html(f"🗑️ {sc('Cleared')} {n} {sc('notes.')}")
