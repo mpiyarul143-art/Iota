@@ -114,6 +114,12 @@ async def handle_index(request):
     return web.FileResponse(os.path.join(_LUDO_DIR, "index.html"))
 
 
+async def handle_health(request):
+    """Health-check endpoint for platforms like Render that ping the
+    bound port to decide if the service is alive."""
+    return web.Response(text="OK", status=200)
+
+
 async def handle_create_game(request):
     """Host creates a new game from /ludo's 'Open Mini App' button."""
     user = _authed_user(request)
@@ -347,6 +353,8 @@ async def _broadcast(gid: str, payload: dict):
 
 def build_app() -> web.Application:
     app = web.Application()
+    app.router.add_get("/", handle_health)
+    app.router.add_get("/health", handle_health)
     app.router.add_get("/ludo", handle_index)
     app.router.add_get("/ludo/", handle_index)
     app.router.add_static("/ludo/static", path=_LUDO_STATIC_DIR, name="ludo_static")

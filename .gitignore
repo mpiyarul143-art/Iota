@@ -6,6 +6,9 @@ __pycache__/
 # ── Secrets / local config (keep local only) ─────────────────
 config.py
 
+# ── Local SQLite database (runtime state, not source) ─────────
+iota/data/
+
 # ── Packed / backup artifacts ────────────────────────────────
 *.zip
 iota_old_backup_*/

@@ -1,0 +1,51 @@
+# Render deploy blueprint for Iota Bot.
+# Docs: https://render.com/docs/blueprint-spec
+#
+# This spins up ONE Web Service that runs both the Telegram long-poll bot
+# AND the Ludo Mini App web server (on $PORT) in a single process.
+#
+# IMPORTANT: set the secret environment variables below in the Render
+# dashboard (or via `render.yaml` env) BEFORE the first deploy. They are
+# NOT stored in this file.
+
+services:
+  - type: web
+    name: iota-bot
+    runtime: python
+    plan: free
+    region: oregon          # pick the region closest to you
+    branch: main            # your repo's default branch
+    rootDir: iota           # all app code + Procfile + requirements.txt live here
+    buildCommand: pip install -r requirements.txt
+    startCommand: sh start.sh
+    healthCheckPath: /
+    # ── Secrets / deploy config (set real values in the Render dashboard) ──
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12"
+      - key: BOT_TOKEN
+        sync: false          # enter your Telegram bot token
+      - key: OWNER_ID
+        sync: false
+      - key: OWNER_USERNAME
+        sync: false
+      - key: MONGO_URI
+        sync: false          # full MongoDB Atlas connection string
+      - key: WEBAPP_BASE_URL
+        sync: false          # e.g. https://iota-bot.onrender.com
+      - key: GROQ_API_KEYS
+        sync: false
+      - key: SARVAM_API_KEY
+        sync: false
+      - key: GIPHY_API_KEY
+        sync: false
+      # Optional providers (leave blank to skip):
+      - key: GEMINI_API_KEYS
+        sync: false
+      - key: OPENROUTER_API_KEYS
+        sync: false
+      - key: CLOUDFLARE_API_KEYS
+        sync: false
+      - key: CLOUDFLARE_ACCOUNT_ID
+        sync: false
+      # Render auto-injects $PORT; the app uses it for the web server.
