@@ -2,15 +2,15 @@
 Iota Smart Sticker / GIF / Photo Reply System
 
 HOW IT WORKS:
-- Sticker received  → detect mood from sticker's emoji field → reply with
-  a matching GIF (from an effectively unlimited live search, see
-  utils/gif_provider.py) + short text reaction. If the incoming message
-  IS a sticker, Iota also replies with a real Telegram sticker of her own
-  when one is configured for that mood (sticker-to-sticker).
-- GIF received      → detect topic from caption/filename → reply with
-  matching GIF + short text
+- Sticker received  → detect mood from sticker's emoji → reply with a
+  REAL Telegram sticker of the same mood (sticker-to-sticker), taken from
+  the owner-managed packs (see handlers/owner_panel.py). Iota NEVER sends a
+  GIF or any text in reply to a sticker. If no sticker is configured for
+  that mood, she stays silent.
+- GIF received      → detect mood from caption/filename → reply with a
+  matching GIF (sticker→sticker / gif→gif only, NO text captions).
 - Photo received    → short AI-generated 1-line reaction
-- Emoji-only DMs    → detect mood → GIF reply
+- Emoji-only DMs    → detect mood → GIF reply (no text)
 
 TRIGGER RULES (group):
 - Only triggers when bot is @tagged OR message is reply to bot's message
@@ -25,10 +25,13 @@ so a failure at any single step (GIF fetch, sticker send, animation
 send) can never crash the handler — there is always a final plain-text
 fallback.
 """
-import random, logging, re
+import asyncio, random, logging, re
 from telegram import Update
 from telegram.ext import ContextTypes
-from utils.mongo_db import ensure_user, get_user, update_last_seen, get_stickers_for_mood
+from telegram.error import TelegramError
+from utils.mongo_db import (ensure_user, get_user, update_last_seen,
+                            get_stickers_for_mood, add_sticker_to_pack,
+                            list_all_sticker_packs)
 from utils.ai_provider import call_ai
 from utils.gif_provider import get_gif_for_mood
 from config import BOT_USERNAME
@@ -67,20 +70,6 @@ _EMOJI_MOOD: dict = {
     "🍑": "cute", "🌼": "cute",
 }
 
-# ── Mood text reactions ───────────────────────────────────────────────────────
-_MOOD_TEXTS: dict = {
-    "happy":   ["haha cutie 😂", "ahahaha 😹", "lol ye kyaa tha 🤣", "LMAO 💀"],
-    "sad":     ["aw 🥺", "kyu ro raha/rahi ho 💔", "chal theek ho jayega 😌", "oops 😅"],
-    "love":    ["aww 🥺💕", "cutie 💗", "itna pyaar 😍", "hehe 💕", "awwww 😭💕"],
-    "laugh":   ["hahaha 😂", "lmao 💀", "bhai/bhen 😹", "ahahaha 🤣", "ye kya tha 😂"],
-    "angry":   ["oye shant 🤚", "chill karo 😌", "🫡 noted", "theek hai baba 😒", "okay okay 😌"],
-    "surprise":["ooh 😮", "kya?? 😱", "sach mein?? 😲", "WAIT WHAT 👀", "no way 😲"],
-    "dance":   ["yayyy 💃✨", "lets gooo 🕺", "vibe hai yaar 💅", "slay 💅"],
-    "cool":    ["😎 slay", "king/queen 👑", "bestie behaviour 💅", "okay bestie 😎"],
-    "cute":    ["awwww 🥺", "so cute 💕", "stop it 😭💗", "yaar 🥺"],
-    "default": ["hehe 😄", "okay cutie 👋", "oof 😅", "hm 🤔", "😊"],
-}
-
 
 def _detect_mood_from_sticker(sticker) -> str:
     """Detect mood from sticker's emoji field."""
@@ -110,65 +99,221 @@ def _detect_mood_from_text(text: str) -> str:
     return "default"
 
 
-async def _reply_with_gif(msg, mood: str, caption_text: str = ""):
-    """
-    Send a GIF matching the mood, sourced from an effectively unlimited
-    live search (GIPHY) instead of a small fixed list. If the owner has
-    added real stickers for this mood (via /addsticker), send one of
-    those instead — true sticker-to-sticker replies. Always sends
-    something — every failure path has a further fallback, so this
-    function can never raise and never leaves the user without a reply.
-    """
-    # Try a real, owner-added sticker first (if any exist for this mood).
-    try:
-        sids = await get_stickers_for_mood(mood)
-    except Exception as e:
-        logger.debug(f"get_stickers_for_mood failed for '{mood}': {e}")
-        sids = []
-    if sids:
-        try:
-            await msg.reply_sticker(random.choice(sids))
-            if caption_text:
-                await msg.reply_html(caption_text)
-            return True
-        except Exception as e:
-            logger.debug(f"Sticker send failed: {e}")
+# ── Related moods (for "no exact match → reply with a similar one") ────────
+# When the detected mood has no saved stickers, we try these related moods
+# before giving up and auto-saving the sender's whole pack.
+_MOOD_RELATED: dict = {
+    "happy":   ["laugh", "dance", "cute", "cool"],
+    "laugh":   ["happy", "cute", "dance"],
+    "love":    ["cute", "sad", "happy"],
+    "cute":    ["love", "happy", "laugh"],
+    "sad":     ["love", "cute"],
+    "angry":   ["cool", "surprise"],
+    "surprise":["cool", "angry"],
+    "dance":   ["happy", "cool", "laugh"],
+    "cool":    ["happy", "dance", "surprise"],
+    "default": [],
+}
 
-    # Live GIF search (unlimited variety, always fresh).
+# In-memory cache of packs Iota has already auto-saved, so a repeat sticker
+# from the same pack doesn't trigger another Telegram API fetch. Maps
+# set_name → mood (the auto-decided one it was saved under).
+_AUTO_SAVED_PACKS: dict = {}
+
+
+def _sanitize_mood(text: str) -> str:
+    """Turn an arbitrary pack title into a safe mood slug: lowercase,
+    spaces→underscores, only [a-z0-9_] kept, collapsed underscores."""
+    slug = (text or "").strip().lower().replace(" ", "_")
+    slug = "".join(ch if (ch.isalnum() or ch == "_") else "_" for ch in slug)
+    slug = re.sub(r"_+", "_", slug).strip("_")
+    return slug or "default"
+
+
+def _auto_mood_from_pack(sticker_set) -> str:
+    """Pick a mood for a WHOLE imported pack by tallying the emojis of every
+    sticker in it. The most common mapped mood wins so the pack lands in the
+    mood the sticker-reply system already understands. Falls back to the
+    pack's sanitized title when no sticker uses a known mood-emoji."""
+    tally = {}
+    for s in getattr(sticker_set, "stickers", []):
+        for ch in (getattr(s, "emoji", "") or ""):
+            m = _EMOJI_MOOD.get(ch)
+            if m:
+                tally[m] = tally.get(m, 0) + 1
+    if tally:
+        return max(tally, key=tally.get)
+    return _sanitize_mood(getattr(sticker_set, "title", ""))
+
+
+def _pick_other(file_ids: list, current_fid: str) -> str:
+    """Pick a random file_id that isn't the incoming one (so Iota doesn't
+    just echo back the exact sticker the user sent). Falls back to the first
+    if the pack only contains that one sticker."""
+    if not file_ids:
+        return current_fid
+    for fid in random.sample(file_ids, len(file_ids)):
+        if fid != current_fid:
+            return fid
+    return file_ids[0]
+
+
+async def _save_pack_background(sticker_set, mood: str, set_name: str) -> None:
+    """Persist every sticker of a pack under its auto-decided mood. Runs as
+    a fire-and-forget background task — add_sticker_to_pack de-dupes via
+    $addToSet, so re-saving the same pack is always safe. added_by=0 marks
+    it as auto-saved by Iota (not the owner)."""
+    try:
+        for s in sticker_set.stickers:
+            try:
+                await add_sticker_to_pack(mood, s.file_id, 0)
+            except Exception as e:
+                logger.debug(f"auto-save: failed to add one sticker: {e}")
+        _AUTO_SAVED_PACKS[set_name] = mood
+    except Exception as e:
+        logger.debug(f"auto-save pack '{set_name}' failed: {e}")
+
+
+async def _reply_sticker_for_mood(msg, mood: str) -> bool:
+    """
+    Reply with a sticker for the EXACT mood, or — if that mood has no saved
+    stickers — a SIMILAR/related mood's sticker. Returns True if one was
+    sent, False otherwise.
+    """
+    packs = await list_all_sticker_packs()
+    candidates = [mood] + _MOOD_RELATED.get(mood, [])
+    for m in candidates:
+        if packs.get(m):
+            try:
+                sids = await get_stickers_for_mood(m)
+            except Exception as e:
+                logger.debug(f"get_stickers_for_mood failed for '{m}': {e}")
+                sids = []
+            if sids:
+                try:
+                    await msg.reply_sticker(random.choice(sids))
+                    return True
+                except Exception as e:
+                    logger.debug(f"Sticker send failed: {e}")
+                    return False
+    return False
+
+
+async def _reply_any_sticker(msg) -> bool:
+    """Last-resort: reply with ANY configured sticker (any mood) so the user
+    always gets a sticker reply when at least one pack exists."""
+    packs = await list_all_sticker_packs()
+    for m in packs:
+        try:
+            sids = await get_stickers_for_mood(m)
+        except Exception as e:
+            logger.debug(f"get_stickers_for_mood failed for '{m}': {e}")
+            sids = []
+        if sids:
+            try:
+                await msg.reply_sticker(random.choice(sids))
+                return True
+            except Exception as e:
+                logger.debug(f"Sticker send failed: {e}")
+                return False
+    return False
+
+
+async def _auto_reply_from_pack(msg, context) -> bool:
+    """
+    Final sticker fallback: the sender's sticker has no matching (or similar)
+    saved sticker, so Iota AUTO-SAVES the sender's ENTIRE pack in the
+    background (no owner command needed) and replies with a sticker from it.
+
+    Flow:
+      • If we've already auto-saved this exact pack (cached), reply with a
+        sticker from that saved mood straight from the DB.
+      • Otherwise fetch the pack via get_sticker_set, kick off a background
+        save of every sticker, and immediately reply with a sticker from the
+        pack (preferring a DIFFERENT one than the user just sent).
+      • A single-sticker pack (only the incoming sticker) is still saved, but
+        we don't echo the identical sticker back — we fall through to the
+        any-sticker fallback instead.
+    """
+    sticker = msg.sticker
+    set_name = getattr(sticker, "set_name", None)
+    if not set_name:
+        return False
+
+    # Already auto-saved before → reuse from DB.
+    cached_mood = _AUTO_SAVED_PACKS.get(set_name)
+    if cached_mood:
+        try:
+            sids = await get_stickers_for_mood(cached_mood)
+        except Exception as e:
+            logger.debug(f"auto-reply cached get failed: {e}")
+            sids = []
+        if sids:
+            try:
+                await msg.reply_sticker(_pick_other(sids, sticker.file_id))
+                return True
+            except Exception as e:
+                logger.debug(f"auto-reply cached send failed: {e}")
+
+    try:
+        sticker_set = await context.bot.get_sticker_set(set_name)
+    except TelegramError as e:
+        logger.warning(f"auto-reply: couldn't fetch pack '{set_name}': {e}")
+        return False
+    except Exception as e:
+        logger.warning(f"auto-reply: unexpected fetch error for '{set_name}': {e}")
+        return False
+
+    mood = _auto_mood_from_pack(sticker_set)
+    file_ids = [s.file_id for s in getattr(sticker_set, "stickers", [])]
+
+    # Save the whole pack in the background (non-blocking).
+    asyncio.create_task(_save_pack_background(sticker_set, mood, set_name))
+
+    # Single-sticker pack → don't echo the identical sticker; let the
+    # any-sticker fallback handle the reply (pack is still saved above).
+    if len(file_ids) <= 1:
+        return False
+
+    reply_fid = _pick_other(file_ids, sticker.file_id)
+    try:
+        await msg.reply_sticker(reply_fid)
+        return True
+    except Exception as e:
+        logger.debug(f"auto-reply: sticker send failed: {e}")
+        return False
+
+
+async def _reply_with_gif(msg, mood: str) -> bool:
+    """
+    GIF-to-GIF: reply with a mood-matched animation only (no caption, no
+    text). The GIF is sourced from an effectively unlimited live search
+    (GIPHY). A GIF reply is ALWAYS a GIF — if the search fails we stay
+    silent rather than sending a stray text message. Can never raise.
+    """
     try:
         gif_url = await get_gif_for_mood(mood)
     except Exception as e:
         logger.debug(f"get_gif_for_mood failed for '{mood}': {e}")
-        gif_url = None
+        return False
 
-    if gif_url:
-        try:
-            await msg.reply_animation(
-                gif_url,
-                caption=caption_text or "",
-                parse_mode="HTML"
-            )
-            return True
-        except Exception as e:
-            logger.debug(f"GIF send failed ({gif_url}): {e}")
-            # One retry with a freshly re-fetched GIF in case the first
-            # link was a transient dead result from the search.
-            try:
-                gif_url2 = await get_gif_for_mood(mood)
-                if gif_url2 and gif_url2 != gif_url:
-                    await msg.reply_animation(
-                        gif_url2, caption=caption_text or "", parse_mode="HTML"
-                    )
-                    return True
-            except Exception as e2:
-                logger.debug(f"GIF retry send failed: {e2}")
+    if not gif_url:
+        return False
 
-    # Last resort: just text — guarantees the user always gets a reply.
-    if caption_text:
+    try:
+        await msg.reply_animation(gif_url)
+        return True
+    except Exception as e:
+        logger.debug(f"GIF send failed ({gif_url}): {e}")
+        # One retry with a freshly re-fetched GIF in case the first link
+        # was a transient dead result from the search.
         try:
-            await msg.reply_html(caption_text)
-        except Exception:
-            pass
+            gif_url2 = await get_gif_for_mood(mood)
+            if gif_url2 and gif_url2 != gif_url:
+                await msg.reply_animation(gif_url2)
+                return True
+        except Exception as e2:
+            logger.debug(f"GIF retry send failed: {e2}")
     return False
 
 
@@ -212,9 +357,16 @@ async def _should_respond(update: Update, context) -> bool:
 
 async def sticker_reply_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Sticker received → reply with a mood-matched GIF + short text.
-    Sticker to sticker: if sticker file_ids are configured in _STICKER_IDS,
-    Iota will reply with a Telegram sticker. Otherwise GIF.
+    Sticker received → reply with a sticker ONLY (never a GIF or text).
+
+    Reply priority for the incoming sticker:
+      1. A saved sticker for the EXACT detected mood.
+      2. If that mood has none, a sticker from a SIMILAR/related mood.
+      3. If even similar has none, Iota AUTO-SAVES the sender's ENTIRE pack
+         in the background (no owner command needed) and replies with a
+         sticker from it.
+      4. As a last resort, any configured sticker at all.
+    If nothing is configured anywhere, she stays silent.
     """
     msg = update.effective_message
     u   = update.effective_user
@@ -227,17 +379,28 @@ async def sticker_reply_handler(update: Update, context: ContextTypes.DEFAULT_TY
     await ensure_user(u.id, u.username or "", u.full_name)
     await update_last_seen(u.id, u.username or "", u.full_name)
 
-    mood     = _detect_mood_from_sticker(msg.sticker)
-    reaction = random.choice(_MOOD_TEXTS.get(mood, _MOOD_TEXTS["default"]))
+    mood = _detect_mood_from_sticker(msg.sticker)
 
-    await _reply_with_gif(msg, mood, reaction)
+    # 1 + 2: exact mood, else a similar/related mood.
+    if await _reply_sticker_for_mood(msg, mood):
+        return
+
+    # 3: no similar sticker → auto-save the sender's whole pack & reply.
+    if await _auto_reply_from_pack(msg, context):
+        return
+
+    # 4: last resort — any configured sticker.
+    if await _reply_any_sticker(msg):
+        return
+
+    # Nothing saved anywhere → stay silent.
 
 
 # ── GIF/animation handler ─────────────────────────────────────────────────────
 
 async def gif_reply_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    GIF received → reply with a mood-matched GIF + short text.
+    GIF received → reply with a mood-matched GIF ONLY (no text caption).
     GIF to GIF: always responds with another animation.
     """
     msg = update.effective_message
@@ -255,9 +418,8 @@ async def gif_reply_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     anim     = msg.animation
     hint     = caption or (getattr(anim, "file_name", "") or "")
     mood     = _detect_mood_from_text(hint)
-    reaction = random.choice(_MOOD_TEXTS.get(mood, _MOOD_TEXTS["default"]))
 
-    await _reply_with_gif(msg, mood, reaction)
+    await _reply_with_gif(msg, mood)
 
 
 # ── Photo handler ─────────────────────────────────────────────────────────────
@@ -312,8 +474,8 @@ async def photo_reaction_handler(update: Update, context: ContextTypes.DEFAULT_T
 
 async def emoji_only_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Pure emoji message in DMs → reply with mood-matched GIF.
-    Emoji-only = all characters are emoji/whitespace (no ASCII letters).
+    Pure emoji message in DMs → reply with a mood-matched GIF ONLY
+    (no text). Emoji-only = all characters are emoji/whitespace.
     """
     msg  = update.effective_message
     u    = update.effective_user
@@ -348,5 +510,4 @@ async def emoji_only_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return  # Has non-emoji text → let normal DM handler deal with it
 
     mood = _detect_mood_from_text(text)
-    reaction = random.choice(_MOOD_TEXTS.get(mood, _MOOD_TEXTS["default"]))
-    await _reply_with_gif(msg, mood, reaction)
+    await _reply_with_gif(msg, mood)

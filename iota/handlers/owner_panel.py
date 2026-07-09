@@ -27,8 +27,13 @@ from utils.mongo_db import (get_db, ensure_user, get_user, update_user,
 from utils.helpers import mention, fmt, mention_owner
 from utils.fonts import sc
 from utils.ai_provider import (get_all_models, get_current_models,
-                                set_model, save_model_config_db)
+                                 set_model, save_model_config_db)
 from utils.safe_html import safe_html, placeholder
+# Re-use Iota's existing emoji→mood detection so auto-decided moods line up
+# with what the sticker-reply system already understands
+# (handlers/sticker_reply.py).
+from handlers.sticker_reply import (_detect_mood_from_sticker,
+                                     _auto_mood_from_pack, _sanitize_mood)
 from config import OWNER_ID, OWNER_USERNAME, OWNER_NAME, GLOBAL_COUPONS
 
 logger = logging.getLogger(__name__)
@@ -143,7 +148,9 @@ async def owner_panel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"/premiumlist [page] — List all premium users\n"
         f"/userslist [page] — List all users\n\n"
         f"<b>🎭 Sticker Packs:</b>\n"
-        f"/addsticker {placeholder('mood')} — Reply to a sticker to add it\n"
+        f"/addpack — Reply to a sticker → auto-saves the WHOLE pack (auto mood!)\n"
+        f"/addsticker [{placeholder('mood')}] — Add one sticker (mood auto if omitted)\n"
+        f"/addstickerpack [{placeholder('mood')}] — Save whole pack (mood auto if omitted)\n"
         f"/stickerpacks — List all packs\n"
         f"/previewsticker {placeholder('mood')} — Preview one\n"
         f"/clearstickers {placeholder('mood')} — Wipe a pack\n\n"
@@ -1100,6 +1107,17 @@ def is_maintenance():
 # A mood can hold multiple stickers — Iota picks randomly among them,
 # so the more you add, the more varied her sticker replies feel.
 
+# ── Auto mood detection ──────────────────────────────────────────────────
+# Lets the owner SKIP typing a mood by hand. Iota decides the mood itself —
+# for a single sticker from its emoji, and for a whole pack by tallying every
+# sticker's emoji and picking the most common mood. If a pack has no known
+# mood-emoji at all, the pack's title becomes the mood. The mood is always
+# created automatically if it doesn't exist yet (add_sticker_to_pack simply
+# $addToSet's into a per-mood doc), and there is no cap — unlimited packs/moods.
+# NOTE: _sanitize_mood / _auto_mood_from_pack are defined once in
+# handlers/sticker_reply.py and imported here, so the owner commands and the
+# automatic sticker-reply logic share a single implementation.
+
 @owner_only
 async def addsticker_cmd(update, context):
     """Owner: reply to a sticker with /addsticker <mood> to add it to that mood's pack."""
@@ -1109,20 +1127,27 @@ async def addsticker_cmd(update, context):
             "📎 <b>Add a reply sticker</b>\n\n"
             "Reply to a sticker with:\n"
             f"<code>/addsticker {placeholder('mood')}</code>\n\n"
+            "Mood is optional — if you leave it out, Iota auto-detects it "
+            "from the sticker's emoji.\n"
             "Example moods: happy, sad, love, laugh, angry, cute, dance, "
             "cool, surprise, slap, kiss, hug, welcome — or make up your own!\n\n"
+            "💡 To save the WHOLE pack in one tap, reply with /addpack.\n\n"
             "See all current packs: /stickerpacks"
         ); return
     if not context.args:
-        await msg.reply_html(f"❌ Usage: /addsticker {placeholder('mood')} (reply to a sticker)"); return
-
-    mood = context.args[0].lower()
+        # No mood given → auto-decide from the replied sticker's emoji.
+        mood = _detect_mood_from_sticker(msg.reply_to_message.sticker)
+        auto = True
+    else:
+        mood = context.args[0].lower()
+        auto = False
     file_id = msg.reply_to_message.sticker.file_id
     await add_sticker_to_pack(mood, file_id, update.effective_user.id)
     count = len(await get_stickers_for_mood(mood))
     await msg.reply_html(
         f"✅ Sticker added to <b>{safe_html(mood)}</b> pack! "
         f"({count} sticker{'s' if count != 1 else ''} in this pack now)"
+        f"{'  🤖 <i>(mood auto-detected)</i>' if auto else ''}"
     )
 
 
@@ -1148,7 +1173,11 @@ async def addstickerpack_cmd(update, context):
             "This saves EVERY sticker in that pack under one mood, not just the one you replied to."
         ); return
     if not context.args:
-        await msg.reply_html(f"❌ Usage: /addstickerpack {placeholder('mood')} (reply to a sticker)"); return
+        # No mood given → auto-decide once we've fetched the pack.
+        auto = True
+    else:
+        mood = context.args[0].lower()
+        auto = False
 
     sticker = msg.reply_to_message.sticker
     set_name = sticker.set_name
@@ -1156,13 +1185,15 @@ async def addstickerpack_cmd(update, context):
         await msg.reply_html("❌ That sticker doesn't belong to a named pack — use /addsticker for a single sticker instead.")
         return
 
-    mood = context.args[0].lower()
     status = await msg.reply_html(f"📦 Fetching sticker pack <b>{safe_html(set_name)}</b>...")
     try:
         sticker_set = await context.bot.get_sticker_set(set_name)
     except TelegramError as e:
         await status.edit_text(f"❌ Couldn't fetch that pack: {safe_html(str(e))}", parse_mode="HTML")
         return
+
+    if auto:
+        mood = _auto_mood_from_pack(sticker_set)
 
     added = 0
     for s in sticker_set.stickers:
@@ -1175,8 +1206,76 @@ async def addstickerpack_cmd(update, context):
     total = len(await get_stickers_for_mood(mood))
     await status.edit_text(
         f"✅ Imported <b>{added}</b> stickers from <b>{safe_html(set_name)}</b> "
-        f"into the <b>{safe_html(mood)}</b> pack!\n"
+        f"into the <b>{safe_html(mood)}</b> pack!"
+        f"{'  🤖 <i>(mood auto-detected)</i>' if auto else ''}\n"
         f"({total} sticker{'s' if total != 1 else ''} in this pack total now)",
+        parse_mode="HTML"
+    )
+
+
+@owner_only
+async def addpack_cmd(update, context):
+    """
+    🆕 Owner: reply to ANY sticker with /addpack — no mood needed. Iota
+    fetches the ENTIRE pack it belongs to and saves EVERY sticker in it
+    under a MOOD IT DECIDES AUTOMATICALLY (tallying the pack's emojis, or
+    falling back to the pack title). The mood is created on the fly if it
+    doesn't exist, and you can pile in as many packs as you like — there is
+    no limit on packs or moods.
+
+    This is the "one tap, whole pack, auto mood" command. /addstickerpack
+    still exists for when you want to NAME the mood yourself.
+    """
+    msg = update.message
+    if not msg.reply_to_message or not msg.reply_to_message.sticker:
+        await msg.reply_html(
+            "📦 <b>Auto-import a whole sticker pack</b>\n\n"
+            "Just reply to ANY sticker from the pack with:\n"
+            "<code>/addpack</code>\n\n"
+            "Iota auto-decides the mood (from the pack's emojis), creates it "
+            "if needed, and saves EVERY sticker in the pack — no mood "
+            "argument required.\n\n"
+            "💡 Want to pick the mood yourself? Use:\n"
+            f"<code>/addstickerpack {placeholder('mood')}</code>"
+        ); return
+
+    sticker = msg.reply_to_message.sticker
+    set_name = sticker.set_name
+    if not set_name:
+        await msg.reply_html(
+            "❌ That sticker isn't part of a named pack.\n"
+            "Reply to a sticker that belongs to a pack, or use /addsticker "
+            "to save just that one sticker."
+        ); return
+
+    status = await msg.reply_html(
+        f"📦 Fetching pack <b>{safe_html(set_name)}</b> and auto-deciding its mood..."
+    )
+    try:
+        sticker_set = await context.bot.get_sticker_set(set_name)
+    except TelegramError as e:
+        await status.edit_text(
+            f"❌ Couldn't fetch that pack: {safe_html(str(e))}", parse_mode="HTML"
+        ); return
+
+    mood = _auto_mood_from_pack(sticker_set)
+
+    added = 0
+    for s in sticker_set.stickers:
+        try:
+            await add_sticker_to_pack(mood, s.file_id, update.effective_user.id)
+            added += 1
+        except Exception as e:
+            logger.debug(f"addpack_cmd: failed to add one sticker: {e}")
+
+    total = len(await get_stickers_for_mood(mood))
+    await status.edit_text(
+        f"✅ Auto-imported <b>{added}</b> sticker{'s' if added != 1 else ''} from "
+        f"<b>{safe_html(set_name)}</b> into the auto-decided mood "
+        f"<b>{safe_html(mood)}</b>!\n"
+        f"({total} sticker{'s' if total != 1 else ''} in this pack total now)\n\n"
+        f"💡 Preview: /previewsticker {mood}\n"
+        f"💡 List all packs: /stickerpacks",
         parse_mode="HTML"
     )
 
