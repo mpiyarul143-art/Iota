@@ -39,8 +39,15 @@ BOT_TOKEN = _require("BOT_TOKEN")
 
 # ── Owner identity ────────────────────────────────────────────────────────
 OWNER_ID       = int(_env("OWNER_ID", "0") or "0")
-OWNER_USERNAME = _env("OWNER_USERNAME", "@owner")
-OWNER_NAME     = _env("OWNER_NAME", "Owner")
+OWNER_USERNAME = _env("OWNER_USERNAME", "@im_ntg")
+OWNER_NAME     = _env("OWNER_NAME", "ɴᴏᴛʜɪɴɢ")
+# Normalize legacy/stale values so a forgotten old username left in the
+# deploy env (e.g. Render dashboard) can never resurface as the bot's
+# identity. The canonical owner handle is @im_ntg.
+if OWNER_USERNAME in ("@Boobies_00", "@Boobies_007", "@owner", ""):
+    OWNER_USERNAME = "@im_ntg"
+if not OWNER_NAME or OWNER_NAME in ("Owner", ""):
+    OWNER_NAME = "ɴᴏᴛʜɪɴɢ"
 
 # ── Bot's own identity ────────────────────────────────────────────────────
 BOT_NAME       = _env("BOT_NAME", "Iota")
