@@ -248,43 +248,20 @@ async def bal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     rank = await get_user_rank(d["_id"])
     lv   = xp_level(d["xp"]); xp_in_lv = d["xp"] % (lv * XP_PER_LEVEL)
     now  = ts()
-    is_private = update.effective_chat.type == "private"
-
-    # 🔴 PRIVACY FIX: exact protection countdown ("23h 57m") used to be
-    # shown to EVERYONE, for EVERYONE, in groups — completely bypassing
-    # the privacy /check already carefully implements (premium-only can
-    # check others, and even then only via DM). That leak told any user
-    # exactly how much longer a target's protection lasts, making it
-    # trivial to time an attack for the moment it expires.
-    #
-    # New rule, matching /check:
-    #  • Your OWN status in DM → full detail (exact time).
-    #  • Your OWN status in a GROUP → generic only publicly; full detail
-    #    is DM'd to you, with a note to check your DM.
-    #  • Someone ELSE's status, anywhere → generic only ("Protected" or
-    #    "Not protected"), NEVER the exact remaining time. Use /check
-    #    (premium-only, DM'd) to see another user's exact time.
+    # Status shows a simple alive / dead indicator (no protection
+    # countdown), matching the requested compact format.
     if d["dead_until"] > now:
-        rem = d["dead_until"]-now
-        status = f"💀 {sc('Dead')} ({rem//3600}h {(rem%3600)//60}m)"
-    elif d["protected_until"] > now:
-        if checking_other:
-            # Never reveal another user's exact countdown here — that's
-            # exactly the leak this fix closes. Direct them to /check.
-            status = f"🛡️ {sc('Protected')} (use /check for details)"
-        elif is_private:
-            rem = d["protected_until"]-now
-            status = f"🛡️ {sc('Protected')} ({rem//3600}h {(rem%3600)//60}m)"
-        else:
-            status = f"🛡️ {sc('Protected')} (DM me /check for exact time)"
+        status_icon = "💀"
+        status = sc("Dead")
     else:
-        status = f"✅ {sc('Alive')}"
+        status_icon = "🔓"
+        status = sc("Alive")
 
     await msg.reply_html(
         f"👤 {bold_sc('Name')}: {mention(tu)}\n"
         f"💰 {bold_sc('Balance')}: {fmt(d.get('balance', 0))}\n"
         f"🏆 {bold_sc('Global Rank')}: #{rank}\n"
-        f"🛡️ {bold_sc('Status')}: {status}\n"
+        f"{status_icon} {bold_sc('Status')}: {status}\n"
         f"⚔️ {bold_sc('Kills')}: {d['kills']}\n"
         f"🟤 {bold_sc(f'Level {lv}')}: {xp_in_lv}/{lv*XP_PER_LEVEL}"
     )
