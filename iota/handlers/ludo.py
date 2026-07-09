@@ -21,6 +21,7 @@ from telegram.ext import ContextTypes
 from utils.mongo_db import ensure_user, get_user, add_balance, deduct_balance
 from utils.helpers import mention, fmt
 from utils.safe_html import safe_html
+from utils.fonts import sc
 from utils.system_gate import games_gate
 
 logger = logging.getLogger(__name__)
@@ -216,7 +217,7 @@ def _render_board(game: dict) -> str:
     left  = [cell(i) for i in range(52, 39, -1)]
 
     lines = []
-    lines.append(f"🎲 <b>IOTA LUDO BOARD</b> 🎲")
+    lines.append(f"🎲 <b>{sc('Iota Ludo Board')}</b> 🎲")
     lines.append(f"┌{'─'*13}┐")
     lines.append(f"│{row1}│")
     for i in range(13):
@@ -231,7 +232,7 @@ def _render_board(game: dict) -> str:
 
 def _render_scoreboard(game: dict) -> str:
     turn_player = game["players"][game["turn"]]
-    lines = ["👥 <b>Players:</b>"]
+    lines = ["👥 <b>" + sc("Players") + ":</b>"]
     for p in game["players"]:
         col   = COLORS[p["color"]]["emoji"]
         home  = p["pieces"].count(WINNING_POS)
@@ -281,7 +282,7 @@ def _lobby_text(game: dict) -> str:
     )
     bet_txt = f"💰 Bet: <b>{fmt(game['bet'])}</b> per player" if game["bet"] else "🆓 Free Game"
     return (
-        f"🎲 <b>IOTA LUDO</b>\n\n"
+        f"🎲 <b>{sc('Iota Ludo')}</b>\n\n"
         f"{bet_txt}\n"
         f"👥 Players ({len(game['players'])}/4):\n{plist}\n\n"
         f"⏳ Waiting for more players...\n"
@@ -335,7 +336,7 @@ async def ludo_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         webapp_url = f"{WEBAPP_BASE_URL}/ludo?game_id={gid}&chat_id={chat.id}&bet={bet}"
         spectate_url = f"{WEBAPP_BASE_URL}/ludo?game_id={gid}&chat_id={chat.id}&mode=spectate"
         caption = (
-            "🎲 <b>IOTA LUDO — Mini App</b>\n\n"
+            f"🎲 <b>{sc('Iota Ludo — Mini App')}</b>\n\n"
             "Play with a real animated board, live dice, and in-lobby chat "
             "— right inside Telegram!\n\n"
             f"💰 Bet: {fmt(bet)} per player\n"
@@ -483,7 +484,7 @@ async def ludo_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         first = game["players"][0]
         txt = (
-            f"🎲 <b>IOTA LUDO SHURU!</b>\n\n"
+            f"🎲 <b>{sc('Iota Ludo Shuru')}</b>\n\n"
             f"{_render_scoreboard(game)}\n\n"
             f"🎯 Pehli baari: {COLORS[first['color']]['emoji']} <b>{first['name']}</b>\n"
             f"Dice roll karo!"
@@ -670,7 +671,7 @@ async def _end_game(q, context, gid: str, winner_p: dict):
     )
 
     result = (
-        f"🏆 <b>IOTA LUDO — GAME OVER!</b>\n\n"
+        f"🏆 <b>{sc('Iota Ludo — Game Over')}</b>\n\n"
         f"👑 <b>WINNER: {COLORS[winner_p['color']]['emoji']} {winner_p['name']}</b>\n"
         f"💰 Prize: <b>{fmt(prize)}</b> coins!\n\n"
         f"🏅 Final Standings:\n{podium}\n\n"
