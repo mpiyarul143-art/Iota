@@ -903,3 +903,93 @@ async def get_raid_history(uid: int, limit: int = 5) -> list:
         {"$or": [{"attacker_id": uid}, {"defender_id": uid}]}
     ).sort("ts", -1).limit(limit)
     return await cursor.to_list(limit)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 🆕 Admin Filters (keyword auto-responders)
+# ══════════════════════════════════════════════════════════════════════
+
+async def save_filter(cid: int, keyword: str, text: str,
+                      file_id=None, ftype: str = "text"):
+    """Create or overwrite a keyword filter for a chat. `keyword` is stored
+    lower-cased so matching is case-insensitive."""
+    kw = keyword.lower().strip()
+    await get_db().filters.update_one(
+        {"chat_id": cid, "keyword": kw},
+        {"$set": {"chat_id": cid, "keyword": kw, "text": text,
+                  "file_id": file_id, "ftype": ftype, "ts": now()}},
+        upsert=True,
+    )
+
+
+async def get_filter(cid: int, keyword: str) -> dict | None:
+    kw = keyword.lower().strip()
+    return await get_db().filters.find_one({"chat_id": cid, "keyword": kw})
+
+
+async def match_filter(cid: int, text: str) -> dict | None:
+    """Return a filter whose keyword appears as a whole/partial token in
+    `text`. Case-insensitive. Multi-word keywords are matched as a substring;
+    single-word keywords are matched as a word boundary so 'bot' doesn't
+    fire on 'robot'."""
+    if not text:
+        return None
+    low = text.lower()
+    doc = await get_db().filters.find_one({"chat_id": cid, "keyword": low})
+    if doc:
+        return doc
+    # Fall back to token search for single-word filters
+    words = set(re.split(r'\W+', low))
+    words.discard("")
+    if not words:
+        return None
+    async for f in get_db().filters.find({"chat_id": cid}):
+        kw = f.get("keyword", "")
+        if " " in kw:
+            if kw in low:
+                return f
+        elif kw in words:
+            return f
+    return None
+
+
+async def list_filters(cid: int) -> list:
+    return await get_db().filters.find({"chat_id": cid}).to_list(1000)
+
+
+async def delete_filter(cid: int, keyword: str) -> bool:
+    kw = keyword.lower().strip()
+    res = await get_db().filters.delete_one({"chat_id": cid, "keyword": kw})
+    return res.deleted_count > 0
+
+
+async def clear_filters(cid: int) -> int:
+    res = await get_db().filters.delete_many({"chat_id": cid})
+    return res.deleted_count
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 🆕 Global Ban (GBAN) — owner-only network-wide ban
+# ══════════════════════════════════════════════════════════════════════
+
+async def add_gban(uid: int, reason: str, by: int) -> bool:
+    res = await get_db().gban.update_one(
+        {"_id": uid},
+        {"$set": {"_id": uid, "reason": reason or "No reason given",
+                  "by": by, "ts": now()}},
+        upsert=True,
+    )
+    return res.upserted_id is not None or res.modified_count > 0
+
+
+async def remove_gban(uid: int) -> bool:
+    res = await get_db().gban.delete_one({"_id": uid})
+    return res.deleted_count > 0
+
+
+async def is_gbanned(uid: int) -> dict | None:
+    return await get_db().gban.find_one({"_id": uid})
+
+
+async def list_gban(limit: int = 50) -> list:
+    return await get_db().gban.find().sort("ts", -1).to_list(limit)

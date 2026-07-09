@@ -105,6 +105,14 @@ DAILY_ROBS_NORMAL   = 150
 DAILY_ROBS_PREMIUM  = 300
 ROB_MAX_NORMAL      = 10_000
 ROB_MAX_PREMIUM     = 100_000
+
+# ── Weekly / Monthly (used by /weekly and /monthly in handlers/economy.py)
+# Scaled up from the daily amounts (≈7× and ≈30×) so the bigger cooldown
+# feels worth the wait.
+WEEKLY_NORMAL       = 3_000
+WEEKLY_PREMIUM      = 7_500
+MONTHLY_NORMAL      = 15_000
+MONTHLY_PREMIUM     = 37_500
 HIGH_VALUE_THEFT_THRESHOLD = 5_000
 TAX_NORMAL          = 0.10
 TAX_PREMIUM         = 0.05

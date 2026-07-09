@@ -242,6 +242,16 @@ def main():
         leet_cmd, zalgo_cmd, hot_cmd, rate_cmd, nhie_cmd,
     )
     from handlers.legal        import terms_cmd, refund_cmd, rules_legal_cmd
+    from handlers.filters import (
+        filter_cmd, filters_cmd, stop_cmd, clearfilters_cmd, filter_enforcement_handler
+    )
+    from handlers.group_control import (
+        setgtitle_cmd, setgdesc_cmd, setgpic_cmd, slowmode_cmd,
+        invitelink_cmd, revoke_cmd, del_cmd
+    )
+    from handlers.gban import (
+        gban_cmd, ungban_cmd, gbanlist_cmd, gban_join_handler
+    )
     from handlers.new_features_v2 import (
         pin_cmd, unpin_cmd, purge_cmd, avatar_cmd,
         eightball_cmd, joke_cmd, fact_cmd, riddle_cmd, riddle_reveal_callback, wyr_cmd,
@@ -545,6 +555,25 @@ def main():
     ]:
         app.add_handler(CommandHandler(c, f))
 
+    # ── 🆕 Powerful Admin Systems (filters / group control / GBAN) ──────
+    for c, f in [
+        ("filter",      filter_cmd),
+        ("filters",     filters_cmd),
+        ("stop",        stop_cmd),
+        ("clearfilters",clearfilters_cmd),
+        ("setgtitle",   setgtitle_cmd),
+        ("setgdesc",    setgdesc_cmd),
+        ("setgpic",     setgpic_cmd),
+        ("slowmode",    slowmode_cmd),
+        ("invitelink",  invitelink_cmd),
+        ("revoke",      revoke_cmd),
+        ("del",         del_cmd),
+        ("gban",        gban_cmd),
+        ("ungban",      ungban_cmd),
+        ("gbanlist",    gbanlist_cmd),
+    ]:
+        app.add_handler(CommandHandler(c, f))
+
     # ── Owner Panel ───────────────────────────────────────────────────
     for c, f in [
         ("panel",owner_panel_cmd),("addcoins",addcoins_cmd),
@@ -633,6 +662,11 @@ def main():
     ))
 
     # ── Member events ──────────────────────────────────────────────────
+    # 🆕 GBAN enforcement MUST run before the welcome handler so a globally
+    # banned user is booted before Iota welcomes them. Runs at group -3.
+    app.add_handler(MessageHandler(
+        filters.StatusUpdate.NEW_CHAT_MEMBERS, gban_join_handler
+    ), group=-3)
     app.add_handler(MessageHandler(
         filters.StatusUpdate.NEW_CHAT_MEMBERS, new_member_handler
     ))
@@ -770,6 +804,13 @@ def main():
         welcome_back_handler
     ), group=4)
 
+    # 4b. 🆕 Admin filters (keyword auto-responders) — fire before the
+    # AI mention handler so a filter reply isn't delayed by AI chatter.
+    app.add_handler(MessageHandler(
+        filters.TEXT & filters.ChatType.GROUPS & ~filters.COMMAND,
+        filter_enforcement_handler
+    ), group=4)
+
     # 5b. AI Truth/Dare reply handler (reacts when user replies to a T/D prompt)
     app.add_handler(MessageHandler(
         filters.TEXT & filters.ChatType.GROUPS & ~filters.COMMAND,
@@ -880,14 +921,14 @@ def main():
         except Exception as e:
             logger.warning(f"Failed to load TTS config from DB (using defaults): {e}")
         # Background jobs
-        # 🔴 FIX: `protection_alert_job` was called here but never defined
-        # or imported anywhere in the codebase — this raised a NameError
-        # inside post_init (NOT wrapped in try/except), crashing the
-        # entire bot on every single startup, silently, before any
-        # handler or command could ever run. Removed the dead call; group
-        # protection (anti-spam/anti-raid/anti-bot) already runs inline
-        # via its own message handlers in handlers/protection.py and does
-        # not need a separate background job.
+        # 🔴 FIX: a previous commit removed the `protection_alert_job`
+        # call from here because it was undefined — but the REAL job
+        # already lived in handlers/alerts.py and was simply never
+        # imported/wired in. Now it IS imported and launched here, so
+        # users get DM warnings when their /protect shield is about to
+        # expire (6h / 2h / 30m before), instead of that code being dead.
+        from handlers.alerts import protection_alert_job
+        asyncio.create_task(protection_alert_job(application.bot))
         asyncio.create_task(auto_daily_job(application.bot))
         asyncio.create_task(birthday_daily_loop(application.bot))
         asyncio.create_task(_memory_cleanup_job())

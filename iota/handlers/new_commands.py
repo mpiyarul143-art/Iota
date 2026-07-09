@@ -9,7 +9,7 @@
 import random, asyncio, time, re
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, Poll
 from telegram.ext import ContextTypes
-from utils.mongo_db import ensure_user, get_user, update_user, add_balance, get_db
+from utils.mongo_db import ensure_user, get_user, update_user, add_balance, deduct_balance, get_db
 from utils.helpers import mention, fmt, xp_level, rank_title
 
 # ─────────────────────────────────────────────────────────────
