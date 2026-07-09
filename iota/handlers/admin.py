@@ -19,7 +19,7 @@ from config import OWNER_ID
 PROMOTE_TITLES = {
     "1": ("🥉", "Junior Admin", {"can_delete_messages": True,
                                   "can_restrict_members": True}),
-    "2": ("🥈", "Admin",        {"can_delete_messages": True,
+    "2": ("🥈", "Senior Admin", {"can_delete_messages": True,
                                   "can_restrict_members": True,
                                   "can_invite_users": True,
                                   "can_pin_messages": True,
@@ -419,7 +419,8 @@ async def _bot_perm_error(context, chat, *needed):
     """
     me = await _bot_member(context, chat)
     if me is None or me.status not in ("administrator", "creator"):
-        return "❌ I need to be an admin in this chat to use that command."
+        return ("❌ Make me an admin in this group first (give me the "
+                "'Add Admins' right too), then I can manage admins.")
     names = {
         "can_promote_members":   "'Add New Admins'",
         "can_change_info":       "'Change Info'",
@@ -433,7 +434,7 @@ async def _bot_perm_error(context, chat, *needed):
     for right in needed:
         if not getattr(me, right, False):
             return (f"❌ I'm missing the {names.get(right, right)} "
-                    f"permission needed for that.")
+                    f"permission — ask a group admin to grant it to me.")
     return None
 
 
