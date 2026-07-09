@@ -22,7 +22,71 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def _install_smallcaps_output():
+    """
+    Make EVERY user-facing text output render in Iota-style smallcaps
+    unicode, WITHOUT editing the ~50 handler files individually.
+
+    We wrap the outbound text methods of the telegram library classes so
+    that `text` / `caption` / `question` arguments are passed through
+    `utils.fonts.sc_out` (tag/URL/entity-aware smallcaps) right before they
+    leave the bot. Covers replies, sends, edits, and callback answers.
+
+    Safe:
+    - HTML tags, URLs and HTML entities are skipped (never corrupted).
+    - Length is preserved, so MessageEntity offsets stay valid.
+    - Already-styled text passes through unchanged (idempotent).
+    """
+    from utils.fonts import sc_out
+    import functools, telegram
+
+    def _wrap(orig, pos_index):
+        @functools.wraps(orig)
+        def wrapper(self, *args, **kwargs):
+            args = list(args)
+            if pos_index is not None and pos_index < len(args) \
+               and isinstance(args[pos_index], str):
+                args[pos_index] = sc_out(args[pos_index])
+            for kw in ("text", "caption", "question"):
+                if kw in kwargs and isinstance(kwargs[kw], str):
+                    kwargs[kw] = sc_out(kwargs[kw])
+            return orig(self, *args, **kwargs)
+        return wrapper
+
+    # class -> [(method, positional-text-index or None)]
+    # None = text is only ever passed as a keyword (caption/question).
+    targets = {
+        telegram.Bot: [
+            ("send_message", 1), ("edit_message_text", 0),
+            ("edit_message_caption", 0), ("send_animation", None),
+            ("send_photo", None), ("send_video", None),
+            ("send_document", None), ("send_audio", None),
+            ("send_voice", None), ("send_poll", 1),
+        ],
+        telegram.Message: [
+            ("reply_text", 0), ("reply_html", 0), ("reply_markdown", 0),
+            ("reply_markdown_v2", 0), ("reply_animation", None),
+            ("reply_photo", None), ("reply_video", None),
+            ("reply_document", None), ("reply_audio", None),
+            ("reply_voice", None), ("reply_poll", 0),
+        ],
+        telegram.CallbackQuery: [
+            ("edit_message_text", 0), ("edit_message_caption", 0),
+            ("answer", 0),
+        ],
+    }
+    for cls, methods in targets.items():
+        for attr, idx in methods:
+            orig = getattr(cls, attr, None)
+            if orig and not getattr(orig, "_iota_sc_wrapped", False):
+                wrapped = _wrap(orig, idx)
+                wrapped._iota_sc_wrapped = True
+                setattr(cls, attr, wrapped)
+    logger.info("🔤 Smallcaps output wrapper installed (all text outputs).")
+
+
 def main():
+    _install_smallcaps_output()
     app = Application.builder().token(BOT_TOKEN).build()
 
     # ── Imports ───────────────────────────────────────────────────────
