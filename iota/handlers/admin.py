@@ -418,9 +418,16 @@ async def _bot_perm_error(context, chat, *needed):
     We surface a clear message instead of letting Telegram error out.
     """
     me = await _bot_member(context, chat)
-    if me is None or me.status not in ("administrator", "creator"):
-        return ("❌ Make me an admin in this group first (give me the "
-                "'Add Admins' right too), then I can manage admins.")
+    if me is None:
+        return ("❌ I couldn't read my own status here. Add me to this "
+                "group as an admin (with the 'Add Admins' right) and retry.")
+    if me.status in ("left", "kicked"):
+        return ("❌ I'm not in this group. Add me as an admin (with the "
+                "'Add Admins' right) first, then I can manage admins.")
+    if me.status not in ("administrator", "creator"):
+        return ("❌ Make me an admin in THIS group first (turn ON the "
+                "'Add Admins' right too) — I only work where I'm an admin "
+                "with that right.")
     names = {
         "can_promote_members":   "'Add New Admins'",
         "can_change_info":       "'Change Info'",
@@ -433,8 +440,9 @@ async def _bot_perm_error(context, chat, *needed):
     }
     for right in needed:
         if not getattr(me, right, False):
-            return (f"❌ I'm missing the {names.get(right, right)} "
-                    f"permission — ask a group admin to grant it to me.")
+            return (f"❌ I'm already an admin in THIS group, but the "
+                    f"{names.get(right, right)} permission is OFF for me. "
+                    f"Turn it ON in this group's admin settings.")
     return None
 
 
