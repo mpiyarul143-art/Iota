@@ -664,30 +664,93 @@ async def _coupon_reply(update, text: str):
         logger.warning(f"coupon reply failed: {e}")
 
 
+async def _redeem_global(u, code, update) -> bool:
+    """
+    Redeem a GLOBAL coupon (owner-created, DB-backed, with a claim limit,
+    OR a built-in promo code from GLOBAL_COUPONS). Returns True if `code`
+    matched a global coupon (claimed or rejected), False if it wasn't a
+    global coupon at all (so the caller can try the group coupon).
+    """
+    # 1) Built-in promo codes (unlimited, one claim per user)
+    if code in GLOBAL_COUPONS:
+        if not await use_global_coupon(u.id, code):
+            await _coupon_reply(update, f"❌ {sc('Already Used!')}"); return True
+        reward = GLOBAL_COUPONS[code]; await add_balance(u.id, reward)
+        await _coupon_reply(update,
+            f"🎟️ {mention(u)} {sc('Redeemed')} <b>{code}</b>!\n💰 +{fmt(reward)}"
+        ); return True
+    # 2) Owner global coupon (DB-backed, with a total claim limit)
+    gc = await get_global_coupon(code)
+    if gc:
+        limit = gc.get("limit", 0) or 0
+        claimed = await global_coupon_claim_count(code)
+        if limit and claimed >= limit:
+            await _coupon_reply(update,
+                f"❌ {sc('Coupon Limit Reached!')} ({claimed}/{limit})"); return True
+        if not await use_global_coupon(u.id, code):
+            await _coupon_reply(update, f"❌ {sc('Already Used!')}"); return True
+        await inc_global_coupon_claimed(code)
+        reward = gc.get("amount", 0); await add_balance(u.id, reward)
+        shown = f"{claimed+1}/{limit}" if limit else f"{claimed+1}/∞"
+        await _coupon_reply(update,
+            f"🎟️ {mention(u)} {sc('Redeemed')} <b>{code}</b>!\n"
+            f"💰 +{fmt(reward)}\n🎟️ {shown} {sc('Claimed')}"
+        ); return True
+    return False
+
+
+async def _redeem_group(u, chat, code, update) -> bool:
+    """
+    Redeem this group's coupon (one per group, keyed by chat_id). Returns
+    True if the group has an active coupon (claimed or rejected), False if
+    there's no group coupon (so the caller can fall back to global).
+    """
+    gc = await get_group_coupon(chat.id)
+    if not gc:
+        return False
+    # If a specific code was given, it must match this group's coupon code.
+    if code and gc.get("code") and gc["code"] != code:
+        return False
+    limit = gc.get("limit", 0) or 0
+    claimed = await group_coupon_claim_count(chat.id)
+    if limit and claimed >= limit:
+        await _coupon_reply(update,
+            f"❌ {sc('Coupon Limit Reached!')} ({claimed}/{limit})"); return True
+    if not await use_group_coupon(u.id, chat.id):
+        await _coupon_reply(update, f"❌ {sc('Already Claimed!')}"); return True
+    await inc_group_coupon_claimed(chat.id)
+    reward = gc.get("amount", 0); await add_balance(u.id, reward)
+    shown = f"{claimed+1}/{limit}" if limit else f"{claimed+1}/∞"
+    await _coupon_reply(update,
+        f"🎟️ {mention(u)} {sc('Claimed')}!\n💰 +{fmt(reward)}\n"
+        f"🎟️ {shown} {sc('Claimed')}"
+    ); return True
+
+
 async def coupons_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args or []
     if not args:
         await _coupon_reply(update,
-            f"🎟 <b>{sc('Iota Cutie Coupons Guide')}</b> 🎟\n\n"
-            f"🔹 /create_coupon — {sc('Create Coupon Code For Ur Gc')}\n"
-            f"🔹 /coupon <code> — {sc('Claim Coupon')}\n"
-            f"🔹 /del_coupon — {sc('Delete The Coupon Code')}\n"
-            f"🔹 /status — {sc('Check Status Of Coupon Code')}\n\n"
-            f"🥀 {sc('You Cant Create 2 Coupons For Same Group.')}\n\n"
-            f"{sc('Redeem global coupon')}: /coupon <code>"
+            f"🎟 <b>{sc('Iota Coupons Guide')}</b> 🎟\n\n"
+            f"🔹 /create_coupon &lt;code&gt; &lt;amount&gt; &lt;limit&gt; — "
+            f"{sc('Group coupon (admin, 1 per group)')}\n"
+            f"🔹 /coupon &lt;code&gt; — {sc('Claim a coupon')}\n"
+            f"🔹 /del_coupon — {sc('Delete your group coupon')}\n"
+            f"🔹 /status — {sc('Group coupon status')}\n\n"
+            f"🥀 {sc('One coupon per group.')}\n"
+            f"🌐 {sc('Owner global coupons are separate — claimable by anyone, once each, up to their limit.')}\n\n"
+            f"{sc('Redeem')}: /coupon &lt;code&gt;"
         ); return
-    code = args[0].lower(); u = update.effective_user
+    code = args[0].lower(); u = update.effective_user; chat = update.effective_chat
     try:
         await ensure_user(u.id, u.username or "", u.full_name)
-        if code in GLOBAL_COUPONS:
-            if not await use_global_coupon(u.id, code):
-                await _coupon_reply(update, f"❌ {sc('Already Used!')}"); return
-            reward = GLOBAL_COUPONS[code]; await add_balance(u.id, reward)
-            await _coupon_reply(update,
-                f"🎟️ {mention(u)} {sc('Redeemed')} <b>{code}</b>!\n💰 +{fmt(reward)}"
-            )
-        else:
-            await _coupon_reply(update, f"❌ {sc('Invalid Coupon Code!')}")
+        # In a group, a group coupon is preferred when its code matches;
+        # otherwise try the global coupon. In private, global only.
+        if chat.type != "private" and await _redeem_group(u, chat, code, update):
+            return
+        if await _redeem_global(u, code, update):
+            return
+        await _coupon_reply(update, f"❌ {sc('Invalid Coupon Code!')}")
     except Exception as e:
         logger.warning(f"coupons_cmd failed: {e}")
         await _coupon_reply(update, f"❌ {sc('Coupon system busy, try again later.')}")
@@ -697,29 +760,17 @@ async def coupon_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat; u = update.effective_user
     try:
         await ensure_user(u.id, u.username or "", u.full_name)
-        if chat.type == "private":
-            args = context.args or []
-            if not args:
-                await _coupon_reply(update, f"🚫 {sc('Use In A Group Or')}: /coupon <code>"); return
-            code = args[0].lower()
-            if code in GLOBAL_COUPONS:
-                if not await use_global_coupon(u.id, code):
-                    await _coupon_reply(update, f"❌ {sc('Already Used!')}"); return
-                await add_balance(u.id, GLOBAL_COUPONS[code])
-                await _coupon_reply(update, f"✅ +{fmt(GLOBAL_COUPONS[code])}")
-            else:
-                await _coupon_reply(update, f"❌ {sc('Invalid!')}")
+        args = context.args or []
+        if not args:
+            if chat.type == "private":
+                await _coupon_reply(update, f"🚫 {sc('Use In A Group Or')}: /coupon &lt;code&gt;"); return
+            await _coupon_reply(update, f"🔹 {sc('Use')}: /coupon &lt;code&gt;"); return
+        code = args[0].lower()
+        if chat.type != "private" and await _redeem_group(u, chat, code, update):
             return
-        gc = await get_group_coupon(chat.id)
-        if not gc:
-            await _coupon_reply(update, f"❌ {sc('No Active Coupon!')}"); return
-        if not await use_group_coupon(u.id, chat.id):
-            await _coupon_reply(update, f"❌ {sc('Already Claimed!')}"); return
-        amount = gc.get("amount", 0)
-        await add_balance(u.id, amount)
-        await _coupon_reply(update,
-            f"🎟️ {mention(u)} {sc('Claimed')}!\n💰 +{fmt(amount)}"
-        )
+        if await _redeem_global(u, code, update):
+            return
+        await _coupon_reply(update, f"❌ {sc('Invalid Coupon Code!')}")
     except Exception as e:
         logger.warning(f"coupon_cmd failed: {e}")
         await _coupon_reply(update, f"❌ {sc('Coupon system busy, try again later.')}")
@@ -733,8 +784,9 @@ async def create_coupon_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_admin(update, context):
         await _coupon_reply(update, "❌ Admins only!"); return
     args = context.args or []
-    if len(args) < 2:
-        await _coupon_reply(update, "Usage: /create_coupon <code> &lt;amount&gt;"); return
+    if len(args) < 3:
+        await _coupon_reply(update,
+            "Usage: /create_coupon &lt;code&gt; &lt;amount&gt; &lt;limit&gt;"); return
     if await get_group_coupon(chat.id):
         await _coupon_reply(update, f"❌ {sc('Already Have A Coupon!')} /del_coupon"); return
     code = args[0].lower()
@@ -744,10 +796,18 @@ async def create_coupon_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.debug(f"create_coupon bad amount: {e}")
         await _coupon_reply(update, "❌ Invalid amount!"); return
     try:
-        await set_group_coupon(chat.id, code, amount, u.id)
+        limit = int(args[2])
+    except Exception as e:
+        logger.debug(f"create_coupon bad limit: {e}")
+        await _coupon_reply(update, "❌ Invalid limit!"); return
+    if limit < 1:
+        await _coupon_reply(update, "❌ Limit must be at least 1!"); return
+    try:
+        await set_group_coupon(chat.id, code, amount, u.id, limit=limit)
         await _coupon_reply(update,
             f"🎟️ {sc('Coupon Created!')}\n"
-            f"{sc('Code')}: <b>{code}</b> | {sc('Reward')}: {fmt(amount)}\n"
+            f"{sc('Code')}: <b>{code}</b> | {sc('Reward')}: {fmt(amount)} "
+            f"| {sc('Limit')}: {limit}\n"
             f"{sc('Claim')}: /coupon {code}"
         )
     except Exception as e:
@@ -778,8 +838,14 @@ async def coupon_status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         gc = await get_group_coupon(chat.id)
         if not gc:
             await _coupon_reply(update, f"❌ {sc('No Active Coupon!')}"); return
+        limit = gc.get("limit", 0) or 0
+        claimed = await group_coupon_claim_count(chat.id)
+        shown = f"{claimed}/{limit}" if limit else f"{claimed}/∞"
         await _coupon_reply(update,
-            f"🎟️ {sc('Code')}: <b>{gc.get('code', '')}</b> | {sc('Reward')}: {fmt(gc.get('amount', 0))}"
+            f"🎟️ {sc('Group Coupon')}\n"
+            f"{sc('Code')}: <b>{gc.get('code', '')}</b> | "
+            f"{sc('Reward')}: {fmt(gc.get('amount', 0))} | "
+            f"{sc('Claimed')}: {shown}"
         )
     except Exception as e:
         logger.warning(f"coupon_status_cmd failed: {e}")

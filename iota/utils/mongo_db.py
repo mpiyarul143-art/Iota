@@ -368,6 +368,63 @@ async def use_group_coupon(uid, cid):
         await get_db().group_coupon_used.insert_one({"user_id":uid,"chat_id":cid}); return True
     except Exception: return False
 
+# ── Coupons with claim limits ──────────────────────────────────────────
+# Global (owner) coupons and group coupons are two SEPARATE systems:
+#   • global_coupons  — created by the owner via /addcoupon, claimable by
+#     ANY user once each, up to `limit` total redemptions.
+#   • group_coupons   — one per group (keyed by chat_id), created by an
+#     admin via /create_coupon, claimable by each group member once, up to
+#     `limit` total redemptions.
+# Both track a live `claimed` counter and per-user uniqueness so a user
+# can never double-claim and the total can never exceed `limit` (modulo a
+# negligible race at the exact boundary, which is fine for a chat bot).
+
+async def get_global_coupon(code):
+    """Return the DB-stored global coupon doc for `code`, or None."""
+    return await get_db().global_coupons.find_one({"_id": code})
+
+async def set_global_coupon(code, amount, limit, by):
+    """Upsert an owner global coupon. `claimed` starts at 0 only on insert."""
+    await get_db().global_coupons.update_one(
+        {"_id": code},
+        {"$set": {"amount": amount, "limit": limit,
+                  "created_by": by, "created_at": now()},
+         "$setOnInsert": {"claimed": 0}},
+        upsert=True
+    )
+
+async def delete_global_coupon(code):
+    await get_db().global_coupons.delete_one({"_id": code})
+    await get_db().global_used_coupons.delete_many({"coupon": code})
+
+async def global_coupon_claim_count(code):
+    return await get_db().global_used_coupons.count_documents({"coupon": code})
+
+async def inc_global_coupon_claimed(code):
+    await get_db().global_coupons.update_one(
+        {"_id": code}, {"$inc": {"claimed": 1}}
+    )
+
+# Extend the group coupon helpers with a `limit` and live `claimed` counter.
+
+async def set_group_coupon(cid, code, amount, by, limit=0):
+    """Upsert a group coupon. `claimed` starts at 0 only on insert."""
+    await get_db().group_coupons.update_one(
+        {"_id": cid},
+        {"$set": {"code": code, "amount": amount, "limit": limit,
+                  "created_by": by, "created_at": now()},
+         "$setOnInsert": {"claimed": 0}},
+        upsert=True
+    )
+
+async def group_coupon_claim_count(cid):
+    return await get_db().group_coupon_used.count_documents({"chat_id": cid})
+
+async def inc_group_coupon_claimed(cid):
+    await get_db().group_coupons.update_one(
+        {"_id": cid}, {"$inc": {"claimed": 1}}
+    )
+
 # ── Valentines ────────────────────────────────────────────────────────
 
 async def get_valentine(uid):
@@ -632,6 +689,7 @@ async def create_indexes():
         await db.global_used_coupons.create_index([("user_id",1),("coupon",1)],unique=True)
         await db.group_coupon_used.create_index([("user_id",1),("chat_id",1)],unique=True)
         await db.stars_payments.create_index([("user_id",1)])
+        await db.global_coupons.create_index([("code",1)])
     except Exception: pass
     try:
         await db.join_requests.create_index([("chat_id",1),("user_id",1)], unique=True)

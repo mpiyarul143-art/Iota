@@ -249,17 +249,48 @@ async def removepremium_cmd(update, context):
 @owner_only
 async def addcoupon_cmd(update, context):
     args = context.args or []
-    if len(args) < 2:
+    if len(args) < 3:
         await update.effective_message.reply_html(
-            f"Usage: /addcoupon {placeholder('code')} {placeholder('amt')}"
+            f"Usage: /addcoupon {placeholder('code')} {placeholder('amt')} {placeholder('limit')}"
         ); return
     code = args[0].lower()
     try:
-        amt = int(args[1])
+        amt = int(args[1]); limit = int(args[2])
     except (ValueError, IndexError):
-        await update.effective_message.reply_html("❌ Invalid amount!"); return
-    GLOBAL_COUPONS[code] = amt
-    await update.effective_message.reply_html(f"🎟️ Coupon <b>{safe_html(code)}</b> = {fmt(amt)} added!")
+        await update.effective_message.reply_html("❌ Invalid amount or limit!"); return
+    if limit < 1:
+        await update.effective_message.reply_html("❌ Limit must be at least 1!"); return
+    try:
+        from utils.mongo_db import set_global_coupon
+        await set_global_coupon(code, amt, limit, update.effective_user.id)
+        await update.effective_message.reply_html(
+            f"🎟️ Global coupon <b>{safe_html(code)}</b> = {fmt(amt)} "
+            f"| {sc('Limit')}: {limit} added!"
+        )
+    except Exception as e:
+        logger.warning(f"addcoupon_cmd failed: {e}")
+        await update.effective_message.reply_html("❌ Could not add coupon, try again.")
+
+
+@owner_only
+async def delcoupon_cmd(update, context):
+    args = context.args or []
+    if not args:
+        await update.effective_message.reply_html(
+            f"Usage: /delcoupon {placeholder('code')}"
+        ); return
+    code = args[0].lower()
+    try:
+        from utils.mongo_db import get_global_coupon, delete_global_coupon
+        if not await get_global_coupon(code):
+            await update.effective_message.reply_html(f"❌ {sc('No such coupon!')}"); return
+        await delete_global_coupon(code)
+        await update.effective_message.reply_html(
+            f"🗑️ Global coupon <b>{safe_html(code)}</b> {sc('deleted!')}"
+        )
+    except Exception as e:
+        logger.warning(f"delcoupon_cmd failed: {e}")
+        await update.effective_message.reply_html("❌ Could not delete coupon, try again.")
 
 
 @owner_only

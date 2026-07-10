@@ -218,7 +218,7 @@ def main():
     from handlers.owner_panel  import (
         owner_panel_cmd, addcoins_cmd, removecoins_cmd, addgems_cmd,
         addpremium_cmd, removepremium_cmd, broadcast_cmd,
-        addcoupon_cmd, ban_user_cmd, unban_user_cmd_owner, stats_cmd,
+        addcoupon_cmd, delcoupon_cmd, ban_user_cmd, unban_user_cmd_owner, stats_cmd,
         stars_stats_cmd, setmodel_cmd, listmodels_cmd,
         scan_cmd, resetuser_cmd, giveall_cmd, maintenance_cmd, dm_cmd,
         premiumlist_cmd, userslist_cmd,
@@ -598,6 +598,7 @@ def main():
         ("removecoins",removecoins_cmd),("addgems",addgems_cmd),
         ("addpremium",addpremium_cmd),("removepremium",removepremium_cmd),
         ("broadcast",broadcast_cmd),("addcoupon",addcoupon_cmd),
+        ("delcoupon",delcoupon_cmd),
         ("banuser",ban_user_cmd),("unbanuser",unban_user_cmd_owner),
         ("botstats",stats_cmd),("starsstats",stars_stats_cmd),
         ("setmodel",setmodel_cmd),("listmodels",listmodels_cmd),
