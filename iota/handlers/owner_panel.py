@@ -246,19 +246,20 @@ async def removepremium_cmd(update, context):
 
 
 @owner_only
+@owner_only
 async def addcoupon_cmd(update, context):
-    args = context.args
+    args = context.args or []
     if len(args) < 2:
-        await update.message.reply_html(
+        await update.effective_message.reply_html(
             f"Usage: /addcoupon {placeholder('code')} {placeholder('amt')}"
         ); return
     code = args[0].lower()
     try:
         amt = int(args[1])
     except (ValueError, IndexError):
-        await update.message.reply_html("❌ Invalid amount!"); return
+        await update.effective_message.reply_html("❌ Invalid amount!"); return
     GLOBAL_COUPONS[code] = amt
-    await update.message.reply_html(f"🎟️ Coupon <b>{safe_html(code)}</b> = {fmt(amt)} added!")
+    await update.effective_message.reply_html(f"🎟️ Coupon <b>{safe_html(code)}</b> = {fmt(amt)} added!")
 
 
 @owner_only

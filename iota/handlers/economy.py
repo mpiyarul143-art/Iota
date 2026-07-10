@@ -648,10 +648,26 @@ async def claim_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"👥 {sc('Members')}: <b>{count}</b>"
     )
 
+async def _coupon_reply(update, text: str):
+    """
+    Defensive reply helper for the coupon system. Always uses
+    effective_message (update.message can be None for some update
+    shapes), and never raises — a reply failure is logged, not bubbled
+    up to the global error handler (which would show the generic
+    "Kuch gadbad" message). This keeps /coupons 100% crash-free.
+    """
+    try:
+        m = update.effective_message
+        if m:
+            await m.reply_html(text)
+    except Exception as e:
+        logger.warning(f"coupon reply failed: {e}")
+
+
 async def coupons_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    args = context.args
+    args = context.args or []
     if not args:
-        await update.message.reply_html(
+        await _coupon_reply(update,
             f"🎟 <b>{sc('Iota Cutie Coupons Guide')}</b> 🎟\n\n"
             f"🔹 /create_coupon — {sc('Create Coupon Code For Ur Gc')}\n"
             f"🔹 /coupon <code> — {sc('Claim Coupon')}\n"
@@ -661,78 +677,113 @@ async def coupons_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"{sc('Redeem global coupon')}: /coupon <code>"
         ); return
     code = args[0].lower(); u = update.effective_user
-    await ensure_user(u.id, u.username or "", u.full_name)
-    if code in GLOBAL_COUPONS:
-        if not await use_global_coupon(u.id, code):
-            await update.message.reply_html(f"❌ {sc('Already Used!')}"); return
-        reward = GLOBAL_COUPONS[code]; await add_balance(u.id, reward)
-        await update.message.reply_html(
-            f"🎟️ {mention(u)} {sc('Redeemed')} <b>{code}</b>!\n💰 +{fmt(reward)}"
-        )
-    else:
-        await update.message.reply_html(f"❌ {sc('Invalid Coupon Code!')}")
+    try:
+        await ensure_user(u.id, u.username or "", u.full_name)
+        if code in GLOBAL_COUPONS:
+            if not await use_global_coupon(u.id, code):
+                await _coupon_reply(update, f"❌ {sc('Already Used!')}"); return
+            reward = GLOBAL_COUPONS[code]; await add_balance(u.id, reward)
+            await _coupon_reply(update,
+                f"🎟️ {mention(u)} {sc('Redeemed')} <b>{code}</b>!\n💰 +{fmt(reward)}"
+            )
+        else:
+            await _coupon_reply(update, f"❌ {sc('Invalid Coupon Code!')}")
+    except Exception as e:
+        logger.warning(f"coupons_cmd failed: {e}")
+        await _coupon_reply(update, f"❌ {sc('Coupon system busy, try again later.')}")
+
 
 async def coupon_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat; u = update.effective_user
-    await ensure_user(u.id, u.username or "", u.full_name)
-    if chat.type == "private":
-        args = context.args
-        if not args: await update.message.reply_html(f"🚫 {sc('Use In A Group Or')}: /coupon <code>"); return
-        code = args[0].lower()
-        if code in GLOBAL_COUPONS:
-            if not await use_global_coupon(u.id, code):
-                await update.message.reply_html(f"❌ {sc('Already Used!')}"); return
-            await add_balance(u.id, GLOBAL_COUPONS[code])
-            await update.message.reply_html(f"✅ +{fmt(GLOBAL_COUPONS[code])}")
-        else:
-            await update.message.reply_html(f"❌ {sc('Invalid!')}")
-        return
-    gc = await get_group_coupon(chat.id)
-    if not gc: await update.message.reply_html(f"❌ {sc('No Active Coupon!')}"); return
-    if not await use_group_coupon(u.id, chat.id):
-        await update.message.reply_html(f"❌ {sc('Already Claimed!')}"); return
-    await add_balance(u.id, gc["amount"])
-    await update.message.reply_html(
-        f"🎟️ {mention(u)} {sc('Claimed')}!\n💰 +{fmt(gc['amount'])}"
-    )
+    try:
+        await ensure_user(u.id, u.username or "", u.full_name)
+        if chat.type == "private":
+            args = context.args or []
+            if not args:
+                await _coupon_reply(update, f"🚫 {sc('Use In A Group Or')}: /coupon <code>"); return
+            code = args[0].lower()
+            if code in GLOBAL_COUPONS:
+                if not await use_global_coupon(u.id, code):
+                    await _coupon_reply(update, f"❌ {sc('Already Used!')}"); return
+                await add_balance(u.id, GLOBAL_COUPONS[code])
+                await _coupon_reply(update, f"✅ +{fmt(GLOBAL_COUPONS[code])}")
+            else:
+                await _coupon_reply(update, f"❌ {sc('Invalid!')}")
+            return
+        gc = await get_group_coupon(chat.id)
+        if not gc:
+            await _coupon_reply(update, f"❌ {sc('No Active Coupon!')}"); return
+        if not await use_group_coupon(u.id, chat.id):
+            await _coupon_reply(update, f"❌ {sc('Already Claimed!')}"); return
+        amount = gc.get("amount", 0)
+        await add_balance(u.id, amount)
+        await _coupon_reply(update,
+            f"🎟️ {mention(u)} {sc('Claimed')}!\n💰 +{fmt(amount)}"
+        )
+    except Exception as e:
+        logger.warning(f"coupon_cmd failed: {e}")
+        await _coupon_reply(update, f"❌ {sc('Coupon system busy, try again later.')}")
+
 
 async def create_coupon_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat; u = update.effective_user
-    if chat.type == "private": await update.message.reply_html(f"🚫 {sc('Group Only!')}"); return
+    if chat.type == "private":
+        await _coupon_reply(update, f"🚫 {sc('Group Only!')}"); return
     from utils.helpers import is_admin
-    if not await is_admin(update, context): await update.message.reply_html("❌ Admins only!"); return
-    args = context.args
-    if len(args) < 2: await update.message.reply_html("Usage: /create_coupon <code> &lt;amount&gt;"); return
+    if not await is_admin(update, context):
+        await _coupon_reply(update, "❌ Admins only!"); return
+    args = context.args or []
+    if len(args) < 2:
+        await _coupon_reply(update, "Usage: /create_coupon <code> &lt;amount&gt;"); return
     if await get_group_coupon(chat.id):
-        await update.message.reply_html(f"❌ {sc('Already Have A Coupon!')} /del_coupon"); return
+        await _coupon_reply(update, f"❌ {sc('Already Have A Coupon!')} /del_coupon"); return
     code = args[0].lower()
-    try: amount = int(args[1])
+    try:
+        amount = int(args[1])
     except Exception as e:
-        logger.debug(f"Suppressed error in economy.py: {e}")
-        await update.message.reply_html("❌ Invalid amount!"); return
-    await set_group_coupon(chat.id, code, amount, u.id)
-    await update.message.reply_html(
-        f"🎟️ {sc('Coupon Created!')}\n"
-        f"{sc('Code')}: <b>{code}</b> | {sc('Reward')}: {fmt(amount)}\n"
-        f"{sc('Claim')}: /coupon {code}"
-    )
+        logger.debug(f"create_coupon bad amount: {e}")
+        await _coupon_reply(update, "❌ Invalid amount!"); return
+    try:
+        await set_group_coupon(chat.id, code, amount, u.id)
+        await _coupon_reply(update,
+            f"🎟️ {sc('Coupon Created!')}\n"
+            f"{sc('Code')}: <b>{code}</b> | {sc('Reward')}: {fmt(amount)}\n"
+            f"{sc('Claim')}: /coupon {code}"
+        )
+    except Exception as e:
+        logger.warning(f"create_coupon_cmd failed: {e}")
+        await _coupon_reply(update, f"❌ {sc('Could not create coupon, try again.')}")
+
 
 async def del_coupon_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
-    if chat.type == "private": await update.message.reply_html(f"🚫 {sc('Group Only!')}"); return
+    if chat.type == "private":
+        await _coupon_reply(update, f"🚫 {sc('Group Only!')}"); return
     from utils.helpers import is_admin
-    if not await is_admin(update, context): await update.message.reply_html("❌ Admins only!"); return
+    if not await is_admin(update, context):
+        await _coupon_reply(update, "❌ Admins only!"); return
     if not await get_group_coupon(chat.id):
-        await update.message.reply_html(f"❌ {sc('No Coupon!')}"); return
-    await delete_group_coupon(chat.id)
-    await update.message.reply_html(f"✅ {sc('Coupon Deleted!')}")
+        await _coupon_reply(update, f"❌ {sc('No Coupon!')}"); return
+    try:
+        await delete_group_coupon(chat.id)
+        await _coupon_reply(update, f"✅ {sc('Coupon Deleted!')}")
+    except Exception as e:
+        logger.warning(f"del_coupon_cmd failed: {e}")
+        await _coupon_reply(update, f"❌ {sc('Could not delete coupon, try again.')}")
+
 
 async def coupon_status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat = update.effective_chat; gc = await get_group_coupon(chat.id)
-    if not gc: await update.message.reply_html(f"❌ {sc('No Active Coupon!')}"); return
-    await update.message.reply_html(
-        f"🎟️ {sc('Code')}: <b>{gc['code']}</b> | {sc('Reward')}: {fmt(gc['amount'])}"
-    )
+    chat = update.effective_chat
+    try:
+        gc = await get_group_coupon(chat.id)
+        if not gc:
+            await _coupon_reply(update, f"❌ {sc('No Active Coupon!')}"); return
+        await _coupon_reply(update,
+            f"🎟️ {sc('Code')}: <b>{gc.get('code', '')}</b> | {sc('Reward')}: {fmt(gc.get('amount', 0))}"
+        )
+    except Exception as e:
+        logger.warning(f"coupon_status_cmd failed: {e}")
+        await _coupon_reply(update, f"❌ {sc('Could not read coupon status.')}")
 
 async def economy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("📖 View Economy Guide", callback_data="eco_guide")]])
