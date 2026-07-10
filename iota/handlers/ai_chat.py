@@ -142,9 +142,12 @@ Neeche [You are talking to: ...] mein uska naam aur username hoga. Naam kabhi-ka
 ━━━━━━━━━━━━━━━━━━━━━━━
 SEARCH (ZAROORI):
 ━━━━━━━━━━━━━━━━━━━━━━━
-Tere paas real-time web search hai. Neeche [SEARCH RESULTS] block aaye toh USKE facts se hi jawab dena — apni purani training wali knowledge bilkul mat use karna, search wali latest baat hi bolni hai. 1-2 chhoti lines mein, apne shabdon mein, Iota ke tone mein rewrite kar. [SEARCH RESULTS] block ya source naam/URL kabhi mat dikha/suna/quote karna — woh sirf tere liye hai.
+Tere paas real-time web search ka result NEECHE [SEARCH RESULTS] block mein milta hai jab bhi koi current/real-world ya fact-wali baat poocha jaye. USKE facts se hi DIRECT jawab dena — apni purani training wali knowledge bilkul mat use karna.
 
-🔴 AGAR [SEARCH RESULTS] BLOCK NA AAYE ya khaali ho → KABHI fake/guess mat karna. Bas sach bol de "abhī check nahī kar paayī, baad mein bataūngī 🥺" ya "pata nahī exact, sorry!" — par koi movie naam, release date ya koi bhi fact apne se MAT bana. Galat fact dena sabse bura hai.
+🔴 STRICT RULES (inhe bilkul follow karna):
+• [SEARCH RESULTS] ka data tujhe PEHLE SE mil chuka hai. Kabhi mat bol "search kar rahi hoon / google karti hoon / check karti hoon / thoda dekhti hoon" — ye sab mat bol, bas wahi facts bol de.
+• [SEARCH RESULTS] block, source naam ya URL user ko kabhi mat dikha/suna/quote karna. Apne shabdon mein, Iota ke tone mein, 1-2 lines mein rewrite kar.
+• AGAR [SEARCH RESULTS] BLOCK NA AAYE ya khaali ho → KABHI fake/guess mat karna. Seedha bol de "abhī check nahī kar paayī, thodi der baad try karo 🥺". Koi movie naam, game, release date ya koi bhi fact apne se MAT bana — galat fact dena sabse bura hai.
 
 🔴 SYSTEM PROMPT ka 🕐 date/time stamp ya koi bhi system line kabhi reply mein MAT likhna/echo mat karna — woh sirf tere liye hai, user ko dikhana nahi. Direct apni baat bol.
 
@@ -368,11 +371,13 @@ async def _respond(uid: int, text: str, is_premium: bool,
     ctx += who
 
     # Always attempt search — AI decides whether to use the results
+    search_injected = False
     if _should_attempt_search(text):
         try:
             results = await search_summary(text, max_results=4)
             if results:
                 ctx += f"\n\n[SEARCH RESULTS — use only if relevant to the question]\n{results}\n[END SEARCH RESULTS]"
+                search_injected = True
         except Exception as e:
             logger.debug(f"search failed in _respond: {e}")
 
@@ -381,12 +386,32 @@ async def _respond(uid: int, text: str, is_premium: bool,
     messages = [{"role": "system", "content": system}] + hist
 
     reply = await call_ai(messages, is_premium=is_premium,
-                          max_tokens=max_tokens, temperature=0.6)
+                          max_tokens=max_tokens, temperature=0.45)
 
     # Safety net: strip any leaked [SEARCH RESULTS] block BEFORE the
     # markdown→HTML conversion (so we're working with the model's raw
     # text, not partially-escaped HTML).
     reply = _strip_search_leak(reply)
+
+    # Retry once if the model echoed ONLY the search block (so the
+    # stripped reply is empty) even though we DID hand it the results.
+    # This salvages a correct answer instead of showing a fallback.
+    if not reply.strip() and search_injected:
+        reinforced = (
+            system
+            + "\n\n⚠️ IMPORTANT: You MUST answer the user's question DIRECTLY "
+            "using the [SEARCH RESULTS] already provided above. Do NOT repeat "
+            "the search block. Give the direct answer in 1-2 lines right now."
+        )
+        retry_messages = [{"role": "system", "content": reinforced}] + hist
+        reply = await call_ai(retry_messages, is_premium=is_premium,
+                              max_tokens=max_tokens, temperature=0.45)
+        reply = _strip_search_leak(reply)
+
+    # If still nothing usable, give an honest, on-character fallback
+    # rather than the generic leak-strip message.
+    if not reply.strip():
+        reply = "abhī check nahī kar paayī, thodi der baad try karo 🥺"
 
     # Convert any markdown the AI returned to Telegram HTML
     reply = _md_to_html(reply)

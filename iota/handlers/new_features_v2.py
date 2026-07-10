@@ -630,49 +630,53 @@ async def withdraw_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def loan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message; u = update.effective_user
     await ensure_user(u.id, u.username or "", u.full_name)
-    current = await get_loan(u.id)
-
-    if not context.args:
-        if current["amount"] > 0:
-            hours_left = max(0, (current["due_ts"] - time.time()) / 3600)
-            await msg.reply_html(
-                f"💳 {sc('You owe')} <b>{fmt(current['amount'])}</b>\n"
-                f"⏳ {sc('Due in')} {hours_left:.1f}h\n"
-                f"{sc('Repay')}: /repay &lt;amount|all&gt;"
-            )
-        else:
-            await msg.reply_html(
-                f"🏦 " + sc(f"Usage: /loan <amount> (max {LOAN_MAX})") +
-                f"\n{sc('Interest')}: {LOAN_INTEREST_PCT}% — {sc('due in')} {LOAN_DURATION_HOURS}h"
-            )
-        return
-
-    if current["amount"] > 0:
-        await msg.reply_html(
-            f"❌ {sc('You already have an outstanding loan of')} {fmt(current['amount'])}.\n"
-            f"{sc('Repay it first')}: /repay &lt;amount|all&gt;"
-        ); return
-
     try:
-        principal = int(context.args[0])
-    except ValueError:
-        await msg.reply_html("❌ " + sc("Amount must be a number.")); return
-    if principal <= 0 or principal > LOAN_MAX:
-        await msg.reply_html(f"❌ " + sc(f"Loan amount must be between 1 and {LOAN_MAX}.")); return
+        current = await get_loan(u.id)
 
-    owed = int(principal * (1 + LOAN_INTEREST_PCT / 100))
-    due_ts = time.time() + LOAN_DURATION_HOURS * 3600
-    # The loan record tracks what's OWED (with interest), not just the
-    # principal — take_loan() credits the principal to the wallet, then
-    # we immediately correct loan_amount to the interest-inclusive total.
-    await take_loan(u.id, principal, due_ts)
-    from utils.mongo_db import get_db
-    await get_db().users.update_one({"_id": u.id}, {"$set": {"loan_amount": owed}})
-    await msg.reply_html(
-        f"💰 {sc('Loan approved!')} +{fmt(principal)} {sc('to your wallet.')}\n"
-        f"💳 {sc('You owe')}: <b>{fmt(owed)}</b> ({LOAN_INTEREST_PCT}% {sc('interest')})\n"
-        f"⏳ {sc('Due in')} {LOAN_DURATION_HOURS}h — {sc('repay with')} /repay"
-    )
+        if not context.args:
+            if current["amount"] > 0:
+                hours_left = max(0, (current["due_ts"] - time.time()) / 3600)
+                await msg.reply_html(
+                    f"💳 {sc('You owe')} <b>{fmt(current['amount'])}</b>\n"
+                    f"⏳ {sc('Due in')} {hours_left:.1f}h\n"
+                    f"{sc('Repay')}: /repay &lt;amount|all&gt;"
+                )
+            else:
+                await msg.reply_html(
+                    f"🏦 " + sc(f"Usage: /loan <amount> (max {LOAN_MAX})") +
+                    f"\n{sc('Interest')}: {LOAN_INTEREST_PCT}% — {sc('due in')} {LOAN_DURATION_HOURS}h"
+                )
+            return
+
+        if current["amount"] > 0:
+            await msg.reply_html(
+                f"❌ {sc('You already have an outstanding loan of')} {fmt(current['amount'])}.\n"
+                f"{sc('Repay it first')}: /repay &lt;amount|all&gt;"
+            ); return
+
+        try:
+            principal = int(context.args[0])
+        except ValueError:
+            await msg.reply_html("❌ " + sc("Amount must be a number.")); return
+        if principal <= 0 or principal > LOAN_MAX:
+            await msg.reply_html(f"❌ " + sc(f"Loan amount must be between 1 and {LOAN_MAX}.")); return
+
+        owed = int(principal * (1 + LOAN_INTEREST_PCT / 100))
+        due_ts = time.time() + LOAN_DURATION_HOURS * 3600
+        # The loan record tracks what's OWED (with interest), not just the
+        # principal — take_loan() credits the principal to the wallet, then
+        # we immediately correct loan_amount to the interest-inclusive total.
+        await take_loan(u.id, principal, due_ts)
+        from utils.mongo_db import get_db
+        await get_db().users.update_one({"_id": u.id}, {"$set": {"loan_amount": owed}})
+        await msg.reply_html(
+            f"💰 {sc('Loan approved!')} +{fmt(principal)} {sc('to your wallet.')}\n"
+            f"💳 {sc('You owe')}: <b>{fmt(owed)}</b> ({LOAN_INTEREST_PCT}% {sc('interest')})\n"
+            f"⏳ {sc('Due in')} {LOAN_DURATION_HOURS}h — {sc('repay with')} /repay"
+        )
+    except Exception as e:
+        logger.exception("loan_cmd failed: %s", e)
+        await msg.reply_html("⚠️ Loan process mein kuch gadbad ho gayi. Owner ko logs check karne bolo 🙄")
 
 
 @economy_gate
