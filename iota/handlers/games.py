@@ -18,7 +18,7 @@ from utils.mongo_db import (
     set_system_status
 )
 from utils.helpers import mention, mention_id, fmt, xp_level, rank_title, ts
-from utils.fonts import sc
+from utils.fonts import sc, sc_all
 from utils.gif_provider import get_gif_for_mood
 from utils.safe_html import placeholder
 from utils.system_gate import games_gate
@@ -55,17 +55,23 @@ async def game_list_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     q = update.callback_query; await q.answer()
     if q.data == "game_list":
         await q.edit_message_text(
-            "🎮 <b>Iota Mini Games</b>\n\n"
-            "🃏 /card — Card Game (4 rounds)\n"
-            "🃏 /bet &lt;amount&gt; — Card Game with Bet\n"
-            "💣 /bomb — Bomb Passing Game\n"
-            "🎭 /bluff — Bluff Card Game\n"
-            "💻 /hack — Hack the Code\n"
-            "📝 /wordgame — Word Guess\n"
-            "🎲 /ludo — Ludo\n"
-            "🏆 /leaders — Card Leaderboard\n"
-            "📊 /rank — Your card rank\n\n"
-            "Admin: /open | /close",
+            sc_all(
+                "🎮 <b>Iota Mini Games</b>\n\n"
+                "🃏 /card — Card Game (4 rounds)\n"
+                "🃏 /bet &lt;amount&gt; — Card Game with Bet\n"
+                "💣 /bomb — Bomb Passing Game\n"
+                "🎭 /bluff — Bluff Card Game\n"
+                "💻 /hack — Hack the Code\n"
+                "📝 /wordgame — Word Guess\n"
+                "🎲 /ludo — Ludo\n"
+                "🏆 /leaders — Card Leaderboard\n"
+                "📊 /rank — Your card rank\n"
+                "🎰 /roulette &lt;amount&gt; — Bid-Elimination Tournament\n"
+                "🤝 /rjoin &lt;amount&gt; — Join a Roulette game\n"
+                "🎯 /bid &lt;amount&gt; — Bid in DM each round\n"
+                "🎡 /wheel — Spin the Iota Wheel (coins/gems)\n\n"
+                "Admin: /open | /close"
+            ),
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data="game_back")]])
         )

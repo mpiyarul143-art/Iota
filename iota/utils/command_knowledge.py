@@ -50,6 +50,11 @@ COMMAND_GROUPS = {
         "/hangman — hangman", "/quiz — AI-powered quiz",
         "/tictactoe — tic tac toe", "/rps — rock paper scissors",
         "/ludo — ludo (chat mode or visual Mini App)", "/leaders — leaderboard",
+        "/roulette <amount> [coins|gems] — bid-elimination tournament "
+        "(host starts, friends /rjoin to enter, then DM /bid each round; "
+        "lowest bidder eliminated every round, last player wins the pot)",
+        "/wheel — spin the Iota Wheel for a chance at coins/gems "
+        "(1h cooldown, /wheel gems to skip it with 💎)",
     ],
     "🧸 Friends & Social": [
         "/slap /punch /kiss /hug /bite — fun action commands",
