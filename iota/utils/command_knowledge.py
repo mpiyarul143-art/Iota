@@ -42,6 +42,20 @@ COMMAND_GROUPS = {
         "/toprich — richest players leaderboard",
         "/shop — spend your coins on items",
         "/slots <bet> — casino slot machine (real Telegram animation, fair odds)",
+        "/lottery buy — buy a ticket, win the group jackpot",
+    ],
+    "🏦 Banking & Market": [
+        "/bank — wallet + bank + savings overview and net worth",
+        "/deposit <amount|all> — move coins wallet → bank (safe from /rob)",
+        "/withdraw <amount|all> — move coins bank → wallet",
+        "/transfer <@user|reply> <amount> — send coins to another user",
+        "/savings deposit|withdraw <amount|all> — earn 2%/day interest on savings",
+        "/loan <amount> — borrow coins (10% interest, due in 24h)",
+        "/repay <amount|all> — repay an outstanding loan",
+        "/networth — your total wealth (wallet + bank + savings − loan)",
+        "/bazaar — buy & sell items for coins (catalog + player market); "
+        "subcommands: buy <item> [qty], sell <item> [qty], "
+        "list <item> <price> [qty], listings [page], buyid <id>, mine, cancel <id>",
     ],
     "🎮 Games": [
         "/card — card game", "/bomb — bomb-passing game", "/bluff — bluff card game",

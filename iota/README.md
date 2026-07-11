@@ -26,7 +26,25 @@ This update found and fixed the root causes behind most broken commands:
 
 ### 💰 Economy
 `/daily` `/bal` `/rob` `/kill` `/revive` `/give` `/wallet` `/toprich`
-`/global_rank` `/streak` `/protect`
+`/global_rank` `/streak` `/protect` `/lottery`
+
+### 🏦 Banking & Market
+- **`/bank`** — wallet + bank + savings overview and net worth
+- **`/deposit <amount|all>`** / **`/withdraw <amount|all>`** — move coins
+  between wallet and bank (bank balance is safe from `/rob`)
+- **`/transfer <@user|reply> <amount>`** — send coins to another user
+- **`/savings deposit|withdraw <amount|all>`** — interest-bearing savings
+  (2%/day, compounding)
+- **`/loan <amount>`** / **`/repay <amount|all>`** — borrow (10% interest,
+  due in 24h) and repay; overdue loans get a one-time penalty
+- **`/networth`** — total wealth (wallet + bank + savings − loan)
+- **`/bazaar`** — buy & sell items for coins:
+  - `/bazaar buy <item> [qty]` — buy from the shop catalog
+  - `/bazaar sell <item> [qty]` — sell owned items back to the shop (60%)
+  - `/bazaar list <item> <price> [qty]` — list an owned item for sale
+  - `/bazaar listings [page]` — browse player listings
+  - `/bazaar buyid <id>` — buy a player's listing
+  - `/bazaar mine` / `/bazaar cancel <id>` — manage your own listings
 
 ### 🎮 Games
 - **`/ludo [bet]`** — Professional Ludo (2-4 players, real board logic,

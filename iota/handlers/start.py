@@ -154,11 +154,16 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/wallet — Deposit/withdraw\n"
             "/toprich — Richest players\n"
             "/shop — Spend your coins\n\n"
-            "🆕 /bank — Wallet + bank overview\n"
+            "🏦 <b>ʙᴀɴᴋɪɴɢ</b>\n"
+            "/bank — Wallet + bank + savings overview\n"
             "/deposit /withdraw — Move coins to/from bank (rob-proof)\n"
+            "/transfer &lt;@user&gt; &lt;amt&gt; — Send coins to a friend\n"
+            "/savings deposit|withdraw — Earn 2%/day interest\n"
             "/loan /repay — Borrow & repay coins\n"
             "/networth — Your total wealth\n"
-            "/lottery — Buy a ticket, win the jackpot"
+            "/lottery — Buy a ticket, win the jackpot\n\n"
+            "🛒 <b>ᴍᴀʀᴋᴇᴛ</b>\n"
+            "/bazaar — Buy & sell items for coins"
         ),
         "menu_village": (
             "🏰 <b>ᴠɪʟʟᴀɢᴇ ᴡᴀʀ</b>\n\n"
