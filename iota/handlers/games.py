@@ -15,6 +15,7 @@ from telegram.ext import ContextTypes
 from utils.mongo_db import (
     ensure_user, get_user, update_user, add_balance, deduct_balance,
     get_card_rank, update_card_rank, get_card_leaders, get_card_rank_position,
+    get_hack_leaders, get_db,
     set_system_status
 )
 from utils.helpers import mention, mention_id, fmt, xp_level, rank_title, ts
@@ -64,7 +65,7 @@ async def game_list_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 "💻 /hack — Hack the Code\n"
                 "📝 /wordgame — Word Guess\n"
                 "🎲 /ludo — Ludo\n"
-                "🏆 /leaders — Card Leaderboard\n"
+                "🏆 /leaders — Game Leaderboards\n"
                 "📊 /rank — Your card rank\n"
                 "🎰 /roulette &lt;amount&gt; — Bid-Elimination Tournament\n"
                 "🤝 /rjoin &lt;amount&gt; — Join a Roulette game\n"
@@ -131,26 +132,109 @@ async def close_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# ── /leaders ──────────────────────────────────────────────────────────────────
+# ── /leaders — Unified game leaderboard panel ────────────────────────────────
+#
+# A single /leaders command opens a leaderboard with a row of game tabs
+# (buttons) under it. Tapping a tab switches the displayed game leaderboard
+# in-place (same UX as the /start economy menu). Only GAMES that have a
+# real persistent leaderboard are listed here.
+
+_LEADERBOARD_TABS = ["card", "hackers"]
+_LEADERBOARD_MEDALS = [
+    "🥇","🥈","🥉","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟",
+    "1️⃣1️⃣","1️⃣2️⃣",
+]
+
+# Tab metadata: label + short title used in the header.
+_LEADERBOARD_INFO = {
+    "card":    {"emoji": "🃏", "title": "Iota Coin Tournament"},
+    "hackers": {"emoji": "💻", "title": "Hackers"},
+}
+
+
+async def _lb_display_name(uid) -> str:
+    """Resolve a display name for a leaderboard row without spamming the
+    Telegram API. Prefer the locally-stored users doc; fall back to a chat
+    lookup only if that fails."""
+    try:
+        doc = await get_db().users.find_one(
+            {"_id": uid}, {"full_name": 1, "username": 1}
+        )
+        if doc:
+            return doc.get("full_name") or doc.get("username") or f"User {uid}"
+    except Exception:
+        pass
+    return f"User {uid}"
+
+
+async def _render_leaderboard(game: str) -> str:
+    """Build the text body for the given game leaderboard tab."""
+    if game == "card":
+        rows = await get_card_leaders(len(_LEADERBOARD_MEDALS))
+        title = _LEADERBOARD_INFO["card"]["title"]
+        text = f"🏆 <b>{title} — Leaderboard</b>\n\n"
+        if not rows:
+            text += "Nᴏ ɢᴀᴍᴇs ᴘʟᴀʏᴇᴅ ʏᴇᴛ!"
+        for i, r in enumerate(rows):
+            name = await _lb_display_name(r["_id"])
+            text += (
+                f"{_LEADERBOARD_MEDALS[i]} <b>{name}</b>\n"
+                f"   🏅 Wins: {r.get('wins',0)} | 💸 Lost: {r.get('losses',0)}\n"
+                f"   💰 Won: {fmt(r.get('won_amount',0))} | 🔥 Streak: {r.get('best_streak',0)}\n\n"
+            )
+        return text
+
+    if game == "hackers":
+        rows = await get_hack_leaders(len(_LEADERBOARD_MEDALS))
+        title = _LEADERBOARD_INFO["hackers"]["title"]
+        text = f"💻 <b>{title} — Leaderboard</b>\n\n"
+        if not rows:
+            text += "Nᴏ ʜᴀᴄᴋꜱ ᴄᴏᴍᴘʟᴇᴛᴇᴅ ʏᴇᴛ!"
+        for i, r in enumerate(rows):
+            name = await _lb_display_name(r["_id"])
+            text += (
+                f"{_LEADERBOARD_MEDALS[i]} <b>{name}</b>\n"
+                f"   🏅 Hacks: {r.get('wins',0)} | 💰 Won: {fmt(r.get('won_amount',0))}\n"
+                f"   🔥 Best Streak: {r.get('best_streak',0)}\n\n"
+            )
+        return text
+
+    return "❌ Unknown leaderboard."
+
+
+def _leaderboard_kb(active: str) -> InlineKeyboardMarkup:
+    """Build the tab selector keyboard, highlighting the active game."""
+    row = []
+    for key in _LEADERBOARD_TABS:
+        info = _LEADERBOARD_INFO[key]
+        mark = "▸ " if key == active else ""
+        label = f"{mark}{info['emoji']} {info['title']}"
+        row.append(InlineKeyboardButton(label, callback_data=f"lb_{key}"))
+    return InlineKeyboardMarkup([row])
+
 
 async def leaders_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    rows   = await get_card_leaders(10)
-    medals = ["🥇","🥈","🥉","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"]
-    text   = "🏆 <b>Iota Coin Tournament — Leaderboard</b>\n\n"
-    for i, r in enumerate(rows):
-        try:
-            u = await context.bot.get_chat(r["_id"])
-            name = u.first_name
-        except Exception:
-            name = str(r["_id"])
-        text += (
-            f"{medals[i]} <b>{name}</b>\n"
-            f"   🏅 Wins: {r['wins']} | 💸 Lost: {r['losses']}\n"
-            f"   💰 Won: {fmt(r['won_amount'])} | 🔥 Streak: {r['best_streak']}\n\n"
+    game = "card"
+    text = await _render_leaderboard(game)
+    await update.message.reply_html(text, reply_markup=_leaderboard_kb(game))
+
+
+async def leaderboard_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    d = q.data
+    if not d.startswith("lb_"):
+        return
+    game = d[3:]
+    if game not in _LEADERBOARD_INFO:
+        return
+    try:
+        text = await _render_leaderboard(game)
+        await q.edit_message_text(
+            text, parse_mode="HTML", reply_markup=_leaderboard_kb(game)
         )
-    if not rows:
-        text += "No games played yet!"
-    await update.message.reply_html(text)
+    except Exception as e:
+        logger.debug(f"leaderboard_callback edit failed for {game}: {e}")
 
 
 # ═══════════════════════════════════════════════════════

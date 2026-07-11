@@ -110,6 +110,7 @@ def main():
     )
     from handlers.games        import (
         game_menu_cmd, open_cmd, close_cmd, leaders_cmd,
+        leaderboard_callback,
         card_cmd, bet_cmd, flip_cmd, card_callback,
         bomb_cmd, bomb_callback, dice_cmd,
         wordgame_cmd, wordgame_letter_handler, game_list_callback
@@ -658,6 +659,7 @@ def main():
     app.add_handler(CallbackQueryHandler(card_callback,         pattern=r"^card_"))
     app.add_handler(CallbackQueryHandler(bomb_callback,         pattern=r"^bomb_"))
     app.add_handler(CallbackQueryHandler(game_list_callback,    pattern=r"^game_"))
+    app.add_handler(CallbackQueryHandler(leaderboard_callback,   pattern=r"^lb_"))
     app.add_handler(CallbackQueryHandler(report_callback,       pattern=r"^rep_"))
     app.add_handler(CallbackQueryHandler(ttt_callback,          pattern=r"^ttt_"))
     app.add_handler(CallbackQueryHandler(rps_callback,          pattern=r"^rps_"))

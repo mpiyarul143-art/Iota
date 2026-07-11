@@ -16,7 +16,12 @@
 import random, asyncio, time
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import ContextTypes
-from utils.mongo_db import ensure_user, get_user, add_balance, deduct_balance, get_db
+import logging
+logger = logging.getLogger(__name__)
+from utils.mongo_db import (
+    ensure_user, get_user, add_balance, deduct_balance, get_db,
+    ensure_hack_rank, update_hack_rank,
+)
 from utils.helpers import mention, fmt
 from utils.fonts import sc
 from utils.system_gate import games_gate
@@ -206,6 +211,19 @@ async def hack_guess_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         game_data = _hack_games.pop(chat.id)
 
         await add_balance(u.id, prize)
+
+        # ── Record Hack leaderboard stats (unified /leaders panel) ──
+        try:
+            hr = await ensure_hack_rank(u.id)
+            await update_hack_rank(
+                u.id,
+                wins=hr["wins"] + 1,
+                won_amount=hr["won_amount"] + prize,
+                streak=hr["streak"] + 1,
+                best_streak=max(hr["best_streak"], hr["streak"] + 1),
+            )
+        except Exception as e:
+            logger.debug(f"hack_rank update failed: {e}")
 
         await update.message.reply_html(
             f"💥 <b>BOOM! HACKED!</b> 💥\n\n"

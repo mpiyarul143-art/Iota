@@ -278,6 +278,37 @@ async def get_card_rank_position(uid):
     t = await get_db().card_rank.count_documents({})
     return c+1, t
 
+# ── Hack rank (Hack-the-Code game leaderboard) ────────────────────────
+#
+# Mirrors the card_rank collection so the unified /leaders panel can switch
+# between game leaderboards. Winner earnings + win count are recorded when a
+# hack game is won (see handlers/hack_game.py). best_streak/streak track the
+# longest consecutive hack wins for a richer leaderboard row.
+
+async def ensure_hack_rank(uid):
+    db = get_db()
+    hr = await db.hack_rank.find_one({"_id":uid})
+    if not hr:
+        hr = {"_id":uid,"wins":0,"losses":0,"won_amount":0,"lost_amount":0,"streak":0,"best_streak":0}
+        await db.hack_rank.insert_one(hr)
+    return hr
+
+async def get_hack_rank(uid):
+    hr = await get_db().hack_rank.find_one({"_id":uid})
+    return hr or await ensure_hack_rank(uid)
+
+async def update_hack_rank(uid, **kw):
+    await get_db().hack_rank.update_one({"_id":uid},{"$set":kw},upsert=True)
+
+async def get_hack_leaders(n=10):
+    return await get_db().hack_rank.find(sort=[("won_amount",-1)],limit=n).to_list(n)
+
+async def get_hack_rank_position(uid):
+    hr = await get_hack_rank(uid)
+    c = await get_db().hack_rank.count_documents({"won_amount":{"$gt":hr["won_amount"]}})
+    t = await get_db().hack_rank.count_documents({})
+    return c+1, t
+
 # ── Group economy ────────────────────────────────────────────────────
 
 # Default group-economy document (see DEFAULT_USER note above). Legacy
