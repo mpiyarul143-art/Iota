@@ -961,10 +961,19 @@ async def granks_cmd(update, context):
     if chat.type=="private": await update.message.reply_html(f"🚫 {sc('Group Only!')}"); return
     rows=await get_granks(chat.id)
     if not rows: await update.message.reply_html(f"📊 {sc('No Data Yet!')}"); return
+    # Group-economy docs don't store names, so resolve them from the
+    # users collection in a single batched lookup (same fix as the
+    # "Unknown" names in /global_rank).
+    ids=[r["user_id"] for r in rows]
+    names={}
+    if ids:
+        cur=get_db().users.find({"_id":{"$in":ids}},{"full_name":1,"username":1})
+        async for u in cur:
+            names[u["_id"]]=u.get("full_name") or u.get("username") or "User"
     medals=["🥇","🥈","🥉","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"]
     text=f"🏆 <b>{sc('Group Ranks')} — {safe_html(chat.title)}</b>\n\n"
     for i,r in enumerate(rows):
-        name=r.get("full_name") or r.get("username") or "User"
+        name=names.get(r["user_id"],"User")
         text+=f"{medals[i]} {mention_id(r['user_id'],name)} — {fmt(r['balance'])}\n"
     await update.message.reply_html(text)
 

@@ -43,22 +43,36 @@ def now(): return int(time.time())
 
 # ── Users ────────────────────────────────────────────────────────────
 
+# Canonical default user document. Every field a handler may read
+# directly (e.g. victim["protected_until"], user["balance"]) is present
+# here so legacy documents — created by an older bot version before some
+# fields existed — never raise KeyError at runtime. get_user/ensure_user
+# always return a doc merged over these defaults.
+DEFAULT_USER = {
+    "username":"", "full_name":"",
+    "balance":0, "gems":0, "is_premium":False, "premium_emoji":"",
+    "last_daily":0, "kills":0, "daily_kills":0, "last_kill_reset":0,
+    "robs":0, "daily_robs":0, "last_rob_reset":0, "xp":0, "level":1,
+    "protected_until":0, "dead_until":0, "wallet":0, "is_banned":False,
+    "free_gem_claimed":False, "custom_title":"",
+    "name_history":[], "username_history":[],
+}
+
 async def ensure_user(uid, username="", full_name=""):
     db = get_db()
     u = await db.users.find_one({"_id": uid})
     if not u:
-        u = {"_id":uid,"username":username,"full_name":full_name,
-             "balance":0,"gems":0,"is_premium":False,"premium_emoji":"",
-             "last_daily":0,"kills":0,"daily_kills":0,"last_kill_reset":0,
-             "robs":0,"daily_robs":0,"last_rob_reset":0,"xp":0,"level":1,
-             "protected_until":0,"dead_until":0,"wallet":0,"is_banned":False,
-             "free_gem_claimed":False,"custom_title":"","created_at":now(),
-             # Seed history with the very first name/username seen, so a
-             # user who never changes anything still has at least one
-             # entry (matches full history depth shown by other bots
-             # instead of staying empty forever).
-             "name_history":[full_name] if full_name else [],
-             "username_history":[username] if username else []}
+        u = dict(DEFAULT_USER)
+        u["_id"] = uid
+        u["username"] = username
+        u["full_name"] = full_name
+        u["created_at"] = now()
+        # Seed history with the very first name/username seen, so a
+        # user who never changes anything still has at least one
+        # entry (matches full history depth shown by other bots
+        # instead of staying empty forever).
+        u["name_history"] = [full_name] if full_name else []
+        u["username_history"] = [username] if username else []
         await db.users.insert_one(u)
     else:
         upd = {}
@@ -85,11 +99,19 @@ async def ensure_user(uid, username="", full_name=""):
         if upd:
             await db.users.update_one({"_id":uid},{"$set":upd})
             u.update(upd)
+        # 🔴 FIX: legacy documents may be missing fields added later
+        # (e.g. protected_until / dead_until). Merge over DEFAULT_USER so
+        # direct dict access in handlers can never raise KeyError.
+        merged = dict(DEFAULT_USER); merged.update(u); u = merged
     return u
 
 async def get_user(uid):
     u = await get_db().users.find_one({"_id":uid})
-    return u or await ensure_user(uid)
+    if not u:
+        return await ensure_user(uid)
+    # 🔴 FIX: fill any fields missing from legacy docs (see ensure_user).
+    merged = dict(DEFAULT_USER); merged.update(u)
+    return merged
 
 async def get_user_by_username(username: str):
     """
@@ -258,19 +280,33 @@ async def get_card_rank_position(uid):
 
 # ── Group economy ────────────────────────────────────────────────────
 
+# Default group-economy document (see DEFAULT_USER note above). Legacy
+# group_economy docs may lack protected_until / dead_until, so reads must
+# be merged over these defaults to avoid KeyError in /grob, /gkill, etc.
+DEFAULT_GUSER = {
+    "user_id":0, "chat_id":0, "balance":0, "kills":0, "robs":0,
+    "protected_until":0, "dead_until":0,
+}
+
 async def ensure_guser(uid, cid):
     key = f"{uid}_{cid}"
     db = get_db()
     gu = await db.group_economy.find_one({"_id":key})
     if not gu:
-        gu = {"_id":key,"user_id":uid,"chat_id":cid,"balance":0,"kills":0,"robs":0,"protected_until":0,"dead_until":0}
+        gu = dict(DEFAULT_GUSER)
+        gu["_id"] = key; gu["user_id"] = uid; gu["chat_id"] = cid
         await db.group_economy.insert_one(gu)
+    else:
+        merged = dict(DEFAULT_GUSER); merged.update(gu); gu = merged
     return gu
 
 async def get_guser(uid, cid):
     key = f"{uid}_{cid}"
     gu = await get_db().group_economy.find_one({"_id":key})
-    return gu or await ensure_guser(uid, cid)
+    if not gu:
+        return await ensure_guser(uid, cid)
+    merged = dict(DEFAULT_GUSER); merged.update(gu)
+    return merged
 
 async def update_guser(uid, cid, **kw):
     if kw: await get_db().group_economy.update_one({"_id":f"{uid}_{cid}"},{"$set":kw},upsert=True)

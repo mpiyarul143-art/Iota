@@ -522,18 +522,18 @@ async def global_rank_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if category not in ("coins", "xp", "kills"):
         category = "coins"
 
-    sort_field = {"coins": "balance", "xp": "xp", "kills": "total_kills"}.get(category, "balance")
+    sort_field = {"coins": "balance", "xp": "xp", "kills": "kills"}.get(category, "balance")
     title_map  = {"coins": "💰 Richest", "xp": "⚡ Top XP", "kills": "💀 Top Killers"}
 
     top = await db.users.find(
         {"is_banned": {"$ne": True}},
-        {"_id": 1, sort_field: 1, "name": 1}
+        {"_id": 1, sort_field: 1, "full_name": 1, "username": 1}
     ).sort(sort_field, -1).limit(10).to_list(10)
 
     lines = [f"🏆 <b>IOTA Global Leaderboard — {title_map[category]}</b>\n"]
     for i, user in enumerate(top):
         val   = user.get(sort_field, 0)
-        name  = user.get("name", "Unknown")[:15]
+        name  = (user.get("full_name") or user.get("username") or "User")[:15]
         emoji = medals[i] if i < len(medals) else f"{i+1}."
         lines.append(f"{emoji} <b>{name}</b> — {fmt(val)}")
 
