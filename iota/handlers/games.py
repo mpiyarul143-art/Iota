@@ -84,6 +84,112 @@ async def game_list_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
 
 
+# ── /games — Animated Games Hub (menu-style category tabs) ────────────────
+#
+# A single /games command opens a dashboard with category tabs. Tapping a tab
+# switches the visible game list in-place (same UX as the /start economy menu
+# and the /leaders game-leaderboard panel). Every game is reachable from here.
+
+_GAMES_HUB_CATS = ["cards", "luck", "multi", "quick", "code", "board"]
+
+_GAMES_HUB_INFO = {
+    "cards": {
+        "icon": "🃏", "title": "Cᴀʀᴅ Gᴀᴍᴇs",
+        "body":
+            "🃏 /card — Cᴀʀᴅ Gᴀᴍᴇ (4 ʀᴏᴜɴᴅs)\n"
+            "🃏 /bet &lt;ᴀᴍᴏᴜɴᴛ&gt; — Cᴀʀᴅ Gᴀᴍᴇ ᴡɪᴛʜ Bᴇᴛ\n"
+            "🎭 /bluff — Bʟᴜꜰꜰ Cᴀʀᴅ Gᴀᴍᴇ\n"
+            "📊 /rank — Yᴏᴜʀ ᴄᴀʀᴅ ʀᴀɴᴋ",
+    },
+    "luck": {
+        "icon": "🎰", "title": "Lᴜᴄᴋ & Cʜᴀɴᴄᴇ",
+        "body":
+            "🎰 /slots &lt;ᴀᴍᴏᴜɴᴛ&gt; — Nᴀᴛɪᴠᴇ Sʟᴏᴛ Mᴀᴄʜɪɴᴇ\n"
+            "🎡 /wheel — Sᴘɪɴ Tʜᴇ Iᴏᴛᴀ Wʜᴇᴇʟ\n"
+            "🎲 /roulette &lt;ᴀᴍᴏᴜɴᴛ&gt; — Bɪᴅ-Eʟɪᴍɪɴᴀᴛɪᴏɴ Tᴏᴜʀɴᴀᴍᴇɴᴛ\n"
+            "🤝 /rjoin &lt;ᴀᴍᴏᴜɴᴛ&gt; — Jᴏɪɴ ᴀ Rᴏᴜʟᴇᴛᴛᴇ ɢᴀᴍᴇ\n"
+            "🎯 /bid &lt;ᴀᴍᴏᴜɴᴛ&gt; — Bɪᴅ ɪɴ DM ᴇᴀᴄʜ ʀᴏᴜɴᴅ",
+    },
+    "multi": {
+        "icon": "🐺", "title": "Mᴜʟᴛɪᴘʟᴀʏᴇʀ",
+        "body":
+            "🐺 /werewolf — Sᴏᴄɪᴀʟ Dᴇᴅᴜᴄᴛɪᴏɴ (5-10)\n"
+            "🎲 /ludo — Lᴜᴅᴏ Gᴀᴍᴇ\n"
+            "💣 /bomb — Bᴏᴍʙ Pᴀssɪɴɢ Gᴀᴍᴇ",
+    },
+    "quick": {
+        "icon": "🕹️", "title": "Qᴜɪᴄᴋ Fᴜɴ",
+        "body":
+            "🎲 /dice &lt;ᴀᴍᴏᴜɴᴛ&gt; — Dɪᴄᴇ Bᴇᴛ\n"
+            "✊ /rps — Rᴏᴄᴋ Pᴀᴘᴇʀ Sᴄɪssᴏʀs\n"
+            "⭕ /tictactoe — Tɪᴄ Tᴀᴄ Tᴏᴇ\n"
+            "📝 /wordgame — Wᴏʀᴅ Gᴜᴇss\n"
+            "❓ /quiz — Aɪ Qᴜɪᴢ\n"
+            "🪢 /hangman — Hᴀɴɢᴍᴀɴ",
+    },
+    "code": {
+        "icon": "💻", "title": "Cᴏᴅᴇ & Bʀᴀɪɴ",
+        "body":
+            "💻 /hack &lt;ʀᴇᴡᴀʀᴅ&gt; &lt;ᴅɪɢɪᴛs&gt; — Hᴀᴄᴋ Tʜᴇ Cᴏᴅᴇ\n"
+            "✍️ /register &lt;ᴀᴍᴏᴜɴᴛ&gt; ᴄᴏɪɴs — Jᴏɪɴ ʜᴀᴄᴋ\n"
+            "🔑 /guess &ltᴘᴀssᴡᴏʀᴅ&gt; — Mᴀᴋᴇ ᴀ ɢᴜᴇss",
+    },
+    "board": {
+        "icon": "🏆", "title": "Lᴇᴀᴅᴇʀʙᴏᴀʀᴅs",
+        "body":
+            "🏆 /leaders — Gᴀᴍᴇ Lᴇᴀᴅᴇʀʙᴏᴀʀᴅs\n"
+            "   Tᴀᴘ ᴛʜᴇ ɢᴀᴍᴇ ᴛᴀʙ ᴛᴏ sᴡɪᴛᴄʜ ʙᴏᴀʀᴅ!\n"
+            "💰 /toprich — Rɪᴄʜᴇsᴛ Pʟᴀʏᴇʀs\n"
+            "💀 /topkill — Tᴏᴘ Kɪʟʟᴇʀs",
+    },
+}
+
+
+def _games_hub_kb(active: str) -> InlineKeyboardMarkup:
+    """Two-row tab selector; active category is marked."""
+    row1, row2 = [], []
+    for i, key in enumerate(_GAMES_HUB_CATS):
+        info = _GAMES_HUB_INFO[key]
+        mark = "▸ " if key == active else ""
+        btn = InlineKeyboardButton(
+            f"{mark}{info['icon']}", callback_data=f"gh_{key}"
+        )
+        (row1 if i < 3 else row2).append(btn)
+    return InlineKeyboardMarkup([row1, row2])
+
+
+def _games_hub_text(cat: str) -> str:
+    info = _GAMES_HUB_INFO[cat]
+    return (
+        f"{info['icon']} <b>{info['title']}</b>\n"
+        f"{'━' * 22}\n\n"
+        f"{info['body']}\n\n"
+        f"👇 Tᴀᴘ ᴀ ᴄᴀᴛᴇɢᴏʀʏ ᴀʙᴏᴠᴇ ᴛᴏ sᴇᴇ ᴍᴏʀᴇ ɢᴀᴍᴇs."
+    )
+
+
+async def games_hub_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    cat = "cards"
+    await update.message.reply_html(_games_hub_text(cat), reply_markup=_games_hub_kb(cat))
+
+
+async def games_hub_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    d = q.data
+    if not d.startswith("gh_"):
+        return
+    cat = d[3:]
+    if cat not in _GAMES_HUB_INFO:
+        return
+    try:
+        await q.edit_message_text(
+            _games_hub_text(cat), parse_mode="HTML", reply_markup=_games_hub_kb(cat)
+        )
+    except Exception as e:
+        logger.debug(f"games_hub_callback edit failed for {cat}: {e}")
+
+
 async def open_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     if chat.type == "private":

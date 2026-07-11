@@ -44,6 +44,7 @@ from utils.mongo_db import (
 from utils.helpers import mention, mention_id, fmt
 from utils.system_gate import games_gate
 from utils.fonts import sc_all
+from utils.game_ui import send_gif_result
 
 logger = logging.getLogger(__name__)
 
@@ -403,14 +404,13 @@ async def _finish(context: ContextTypes.DEFAULT_TYPE, cid: int):
 
     wu = await get_user(winner)
     wname = wu.get("full_name") or "User"
-    await context.bot.send_message(
-        cid,
+    await send_gif_result(
+        context, cid, "roulette_win",
         sc_all(
             f"🏆 <b>Iota Roulette Winner!</b> 💙\n\n"
             f"👑 {mention_id(winner, wname)} jeet gaya pot of "
             f"<b>{fmt(pot)} {currency}</b>!\n\n"
             f"Mubarak ho! 💙"
         ),
-        parse_mode="HTML",
     )
     _GAMES.pop(cid, None)

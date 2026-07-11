@@ -34,6 +34,7 @@ from utils.mongo_db import ensure_user, add_balance
 from utils.helpers import mention, fmt
 from utils.safe_html import safe_html
 from utils.system_gate import games_gate
+from utils.game_ui import send_gif_result
 
 CARD_NAMES = {1: "A", 2: "B", 3: "C", 4: "D"}
 SLOT_LETTERS = "abcd"  # how a player refers to their own hand positions when dropping
@@ -361,15 +362,14 @@ async def _end_game(context, chat_id: int, winner: dict):
         f"{medals[i]} {p['name']} — {len(p['hand'])} cards left"
         for i, p in enumerate(standing)
     )
-    await context.bot.send_message(
-        chat_id,
+    over_text = (
         f"🏆 <b>BLUFF GAME OVER!</b>\n\n"
         f"👑 Winner: <b>{winner['name']}</b>!\n"
         f"💰 Prize: +750 coins!\n\n"
         f"📊 Final standings:\n{board}\n\n"
-        f"🎮 Play again: /bluff",
-        parse_mode="HTML"
+        f"🎮 Play again: /bluff"
     )
+    await send_gif_result(context, chat_id, "bluff_win", over_text)
 
 
 async def bluffend_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):

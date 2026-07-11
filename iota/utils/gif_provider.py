@@ -83,6 +83,17 @@ _SEARCH_TERMS = {
     "throw":    "anime throw across room",
     "kick":     "anime kick",
     "funny":    "funny meme reaction",
+    # ── Game-result moods (used by the unified game UI in utils/game_ui.py) ──
+    "win":        "anime celebration win",
+    "lose":       "anime sad crying",
+    "jackpot":    "anime money rich celebration",
+    "hack_win":   "anime hacker typing screen",
+    "roulette_win": "anime celebration win confetti",
+    "bluff_win":  "anime evil laugh",
+    "werewolf_win": "anime victory battle",
+    "wheel":      "anime spin wheel luck",
+    "slot_win":   "anime celebration win jackpot",
+    "game_start": "anime ready fight",
 }
 
 

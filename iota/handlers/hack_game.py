@@ -22,6 +22,7 @@ from utils.mongo_db import (
     ensure_user, get_user, add_balance, deduct_balance, get_db,
     ensure_hack_rank, update_hack_rank,
 )
+from utils.game_ui import send_gif_result
 from utils.helpers import mention, fmt
 from utils.fonts import sc
 from utils.system_gate import games_gate
@@ -225,7 +226,7 @@ async def hack_guess_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.debug(f"hack_rank update failed: {e}")
 
-        await update.message.reply_html(
+        win_text = (
             f"💥 <b>BOOM! HACKED!</b> 💥\n\n"
             f"🏆 <b>{mention(u)} cracked the password!</b>\n"
             f"🔑 Password was: <code>{password}</code>\n"
@@ -234,6 +235,7 @@ async def hack_guess_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"You win {fmt(prize)} coins! 🎉\n"
             f"Thanks for playing! See you next time~ 💕"
         )
+        await send_gif_result(context, update.effective_chat.id, "hack_win", win_text)
         return
 
     # Not won yet

@@ -37,6 +37,7 @@ from utils.mongo_db import ensure_user, add_balance
 from utils.helpers import mention, fmt
 from utils.safe_html import safe_html
 from utils.system_gate import games_gate
+from utils.game_ui import send_gif_result
 
 logger = logging.getLogger(__name__)
 
@@ -609,11 +610,10 @@ async def _end_game(context, chat_id, winner: str):
         except Exception:
             pass
 
-    await context.bot.send_message(
-        chat_id,
+    await send_gif_result(
+        context, chat_id, "werewolf_win",
         f"{title}\n\n"
         f"🎭 <b>Final roles:</b>\n{reveal}\n\n"
         f"💰 Winners earned 150 coins each!\n"
         f"Play again anytime with /werewolf.",
-        parse_mode="HTML"
     )

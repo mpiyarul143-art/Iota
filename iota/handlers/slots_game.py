@@ -42,6 +42,7 @@ from utils.mongo_db import ensure_user, get_user, add_balance, deduct_balance
 from utils.helpers import mention, fmt
 from utils.safe_html import safe_html
 from utils.system_gate import games_gate
+from utils.game_ui import send_gif_result
 
 logger = logging.getLogger(__name__)
 
@@ -123,4 +124,8 @@ async def slots_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         result_text = f"💸 <b>No match.</b>\n{reel_display}\n\nLost {fmt(bet)}. Better luck next time!"
 
     new_balance = d["balance"] - bet + payout
-    await msg.reply_html(f"{mention(u)}\n\n{result_text}\n\n💼 Balance: {fmt(new_balance)}")
+    result_text = (
+        f"{mention(u)}\n\n{result_text}\n\n💼 Balance: {fmt(new_balance)}"
+    )
+    mood = "slot_win" if multiplier >= 4 else ("win" if multiplier >= 1 else "lose")
+    await send_gif_result(context, msg.chat_id, mood, result_text)

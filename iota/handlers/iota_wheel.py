@@ -39,6 +39,7 @@ from utils.mongo_db import (
 from utils.helpers import mention, fmt
 from utils.system_gate import games_gate
 from utils.fonts import sc_all
+from utils.game_ui import send_gif_result
 
 logger = logging.getLogger(__name__)
 
@@ -116,9 +117,11 @@ async def wheel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     d2 = await get_user(u.id)
     bal = fmt(d2.get("balance", 0))
     gem = fmt(d2.get("gems", 0))
-    await msg.reply_html(sc_all(
+    wheel_text = sc_all(
         f"🎡 <b>Iota Wheel spin!</b>\n\n"
         f"{label}\n{result}\n\n"
         f"💰 Coins: {bal}\n💎 Gems: {gem}\n"
         f"⏳ Agla free spin 1h baad."
-    ))
+    )
+    mood = "jackpot" if label.startswith("🏆") else "wheel"
+    await send_gif_result(context, msg.chat_id, mood, wheel_text)
