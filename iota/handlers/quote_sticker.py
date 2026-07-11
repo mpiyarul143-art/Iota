@@ -1,10 +1,16 @@
 """
-Iota Bot — /q (Quote Sticker Command)
+Iota Bot — /q (Quote Sticker / Image Command)
 
-Reply to any text message with /q and Iota turns it into a styled quote
-sticker — sender's name, avatar, and the message text, rendered as a
-proper 512x512 Telegram sticker. See utils/quote_render.py for the
-actual rendering engine and utils/font_manager.py for font handling.
+Reply to a message with /q (or .q) to turn it into a styled quote card.
+
+Usage:
+  /q                 → quote the replied message (WEBP sticker)
+  /q 2  /q 3         → quote a short thread (last N messages)
+  /q png  /q img     → send as a PNG image instead of a sticker
+  /q dark | light | white | purple | blue   → theme
+  /q color #ff3366   → custom background colour
+
+Flags can be combined, e.g.  /q 3 purple png
 """
 import logging
 
@@ -12,12 +18,59 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 from utils.helpers import get_profile_photo_id
-from utils.quote_render import render_quote_sticker, QuoteRenderError
+from utils.quote_render import render_quote_card, QuoteRenderError
 from utils.safe_html import safe_html
 
 logger = logging.getLogger(__name__)
 
-MAX_QUOTE_LENGTH = 400  # beyond this, even the smallest font can't stay readable
+MAX_QUOTE_LENGTH = 400      # per-message cap before we refuse
+MAX_THREAD = 10             # hard cap on /q N
+MODES = {"png", "img"}
+THEME_NAMES = {"dark", "light", "white", "purple", "blue"}
+
+
+async def _gather_messages(update, context, reply, count):
+    """Build the list of {name,text,uid} dicts to render.
+
+    Starts from the replied message; if count > 1, walks backwards through
+    chat history to collect a short thread. Always returns at least [reply].
+    """
+    primary = reply
+    msgs = []
+
+    async def _as_dict(m):
+        u = m.from_user
+        text = m.text or m.caption
+        if not text or not text.strip():
+            return None
+        name = (u.full_name or u.first_name or "Someone") if u else "Someone"
+        return {"name": name, "text": text.strip(),
+                "uid": u.id if u else 0}
+
+    head = await _as_dict(primary)
+    if head:
+        msgs.append(head)
+
+    if count > 1:
+        try:
+            older = []
+            history = await context.bot.get_chat_history(
+                update.effective_chat.id,
+                offset_id=primary.message_id, offset=0, limit=count - 1,
+            )
+            for m in history:
+                d = await _as_dict(m)
+                if d:
+                    older.append(d)
+                if len(msgs) + len(older) >= count:
+                    break
+            # Keep the replied (primary) message first so the card header
+            # (avatar + name) always belongs to it; older messages follow.
+            msgs = msgs + list(reversed(older))
+        except Exception as e:
+            logger.debug(f"/q thread history fetch failed: {e}")
+
+    return msgs
 
 
 async def quote_sticker_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -26,63 +79,94 @@ async def quote_sticker_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not reply:
         await msg.reply_html(
-            "❌ Reply to a message with /q to turn it into a quote sticker!"
+            "❌ Reply to a message with /q to turn it into a quote!"
         ); return
 
-    # Only text (or captioned media, using the caption) can become a
-    # readable quote card. Give a specific reason rather than a generic
-    # failure for the common "replied to a sticker/photo with no text" case.
-    text = reply.text or reply.caption
-    if not text or not text.strip():
+    # ── Parse arguments ────────────────────────────────────────────────
+    mode = "sticker"
+    theme = "dark"
+    count = 1
+    args = list(context.args or [])
+    i = 0
+    while i < len(args):
+        a = args[i].lower()
+        if a in MODES:
+            mode = "png"
+        elif a in THEME_NAMES:
+            theme = a
+        elif a == "color":
+            if i + 1 < len(args):
+                theme = "color " + args[i + 1]
+            i += 1; continue
+        elif a.isdigit():
+            n = int(a)
+            if 1 <= n <= MAX_THREAD:
+                count = n
+        i += 1
+
+    # ── Validate message type ──────────────────────────────────────────
+    if not (reply.text or reply.caption) or not (reply.text or reply.caption).strip():
         if reply.sticker:
             await msg.reply_html("❌ Can't quote a sticker — reply to a text message instead."); return
         if reply.photo or reply.video or reply.animation:
-            await msg.reply_html(
-                "❌ This message type isn't supported — reply to a text message "
-                "(a caption works too) instead."
-            ); return
+            await msg.reply_html("❌ Reply to a text message (a caption works too) to quote it."); return
         if reply.voice or reply.audio:
-            await msg.reply_html("❌ Can't quote a voice/audio message — reply to a text message instead."); return
+            await msg.reply_html("❌ Can't quote a voice/audio message — reply to text."); return
         await msg.reply_html("❌ This message type isn't supported."); return
 
-    if len(text) > MAX_QUOTE_LENGTH:
+    if len(reply.text or reply.caption or "") > MAX_QUOTE_LENGTH:
         await msg.reply_html(
-            f"❌ That message is too long to fit on a sticker "
-            f"({len(text)}/{MAX_QUOTE_LENGTH} characters max)."
+            f"❌ That message is too long to fit on a quote "
+            f"({len(reply.text or reply.caption)}/{MAX_QUOTE_LENGTH} max)."
         ); return
 
+    messages = await _gather_messages(update, context, reply, count)
+    if not messages:
+        await msg.reply_html("❌ Nothing quotable found in that message."); return
+
+    # ── Reply preview (nested quote) ───────────────────────────────────
+    reply_preview = None
+    if reply.reply_to_message:
+        rp = reply.reply_to_message
+        rptext = (rp.text or rp.caption or "").strip()
+        if rptext:
+            ru = rp.from_user
+            rpname = (ru.full_name or ru.first_name or "Someone") if ru else "Someone"
+            reply_preview = {"name": rpname, "text": rptext[:120]}
+
+    # ── Avatar ─────────────────────────────────────────────────────────
     sender = reply.from_user
-    if not sender:
-        await msg.reply_html("❌ Can't identify who sent that message."); return
-
-    display_name = sender.full_name or sender.first_name or "Someone"
-
-    # Fetch the sender's real profile photo if they have one — falls
-    # back to a colored initial-letter avatar inside render_quote_sticker
-    # if this returns None for any reason (no PFP set, privacy, etc.).
     avatar_bytes = None
-    try:
-        file_id = await get_profile_photo_id(context, sender.id)
-        if file_id:
-            tg_file = await context.bot.get_file(file_id)
-            avatar_bytes = bytes(await tg_file.download_as_bytearray())
-    except Exception as e:
-        logger.debug(f"quote_sticker_cmd: avatar fetch failed for {sender.id}: {e}")
-        avatar_bytes = None
+    if sender:
+        try:
+            fid = await get_profile_photo_id(context, sender.id)
+            if fid:
+                tgf = await context.bot.get_file(fid)
+                avatar_bytes = bytes(await tgf.download_as_bytearray())
+        except Exception as e:
+            logger.debug(f"/q avatar fetch failed for {sender.id}: {e}")
+            avatar_bytes = None
 
+    # ── Render + send ──────────────────────────────────────────────────
     try:
-        sticker_bytes = render_quote_sticker(display_name, text, avatar_bytes, sender.id)
+        img_bytes = render_quote_card(
+            messages, avatar_bytes, theme=theme, mode=mode,
+            reply_preview=reply_preview,
+        )
     except QuoteRenderError as e:
         await msg.reply_html(safe_html(str(e))); return
     except Exception as e:
-        logger.exception(f"quote_sticker_cmd: unexpected render failure: {e}")
-        await msg.reply_html("❌ Couldn't generate that sticker — please try again."); return
+        logger.exception(f"/q render failed: {e}")
+        await msg.reply_html("❌ Couldn't generate that quote — please try again."); return
 
     import io
-    sticker_file = io.BytesIO(sticker_bytes)
-    sticker_file.name = "quote.webp"
+    file_obj = io.BytesIO(img_bytes)
+    file_obj.name = "quote.webp" if mode == "sticker" else "quote.png"
     try:
-        await msg.reply_sticker(sticker_file)
+        if mode == "sticker":
+            await msg.reply_sticker(file_obj)
+        else:
+            await msg.reply_photo(file_obj, caption="💬 Quote")
     except Exception as e:
-        logger.warning(f"quote_sticker_cmd: send_sticker failed: {e}")
-        await msg.reply_html("❌ Couldn't send that sticker — please try again.")
+        logger.warning(f"/q send failed: {e}")
+        await msg.reply_html("❌ Couldn't send that quote — please try again.")

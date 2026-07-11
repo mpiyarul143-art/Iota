@@ -15,6 +15,7 @@ from utils.mongo_db import (add_warning, get_warnings, remove_last_warning,
 from utils.helpers import ts, mention, parse_duration, is_admin, promote_with_rights
 from utils.safe_html import safe_html
 from handlers.whisper import whisper_cmd
+from handlers.quote_sticker import quote_sticker_cmd
 from utils.fonts import sc
 from config import OWNER_ID
 
@@ -58,6 +59,10 @@ async def dot_admin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # or with a named @user; route through the whisper handler.
         context.args = rest.split() if rest else []
         await whisper_cmd(update, context); return
+    if cmd == "q":
+        # Public command — no admin requirement. Reply to a message + .q.
+        context.args = rest.split() if rest else []
+        await quote_sticker_cmd(update, context); return
     if cmd == "imute":
         if not await is_admin(update, context) and update.effective_user.id != OWNER_ID:
             await msg.reply_html("❌ Admins only!"); return
