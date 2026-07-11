@@ -147,17 +147,45 @@ async def delete_later(bot, cid, mid, delay=300):
 
 async def promote_with_rights(bot, chat_id, user_id, rights: ChatAdministratorRights):
     """
-    Apply a ChatAdministratorRights object via promote_chat_member.
+    Apply a ChatAdministratorRights object via promote_chat_member, in a way
+    that works across chat types and python-telegram-bot versions.
 
-    Works regardless of python-telegram-bot version: some builds accept a
-    single `rights=` keyword, while others (e.g. the installed 21.3) only
-    accept the individual boolean flags — passing `rights=` there raises
-    "unexpected keyword argument 'rights'". This helper always uses the
-    individual-flag form so promotion/demotion works everywhere.
+    🔴 FIX: Chat-admin rights are split between groups and channels. The
+    `can_post_messages` / `can_edit_messages` / `can_post_stories` /
+    `can_edit_stories` / `can_delete_stories` flags are CHANNEL-ONLY. Sending
+    them to a group/supergroup makes Telegram reject the whole call with a
+    channel-related BadRequest (the "Bot_channels_na" error on demote), even
+    though promote often slipped through. We detect the chat type once and
+    only pass the rights that are valid for that type. In a channel an admin
+    MUST keep can_post_messages (you can't have a channel admin that can't
+    post), so demoting there leaves it True.
     """
     try:
-        await bot.promote_chat_member(
-            chat_id, user_id,
+        chat = await bot.get_chat(chat_id)
+        is_channel = getattr(chat, "type", None) == "channel"
+    except Exception:
+        is_channel = False
+
+    if is_channel:
+        # Channel admins: keep can_post_messages True (required), drop the
+        # group-only rights (pin / delete_messages / video_chats / topics).
+        kwargs = dict(
+            is_anonymous=rights.is_anonymous,
+            can_post_messages=True,
+            can_edit_messages=rights.can_edit_messages,
+            can_post_stories=rights.can_post_stories,
+            can_edit_stories=rights.can_edit_stories,
+            can_delete_stories=rights.can_delete_stories,
+            can_change_info=rights.can_change_info,
+            can_invite_users=rights.can_invite_users,
+            can_restrict_members=rights.can_restrict_members,
+            can_promote_members=rights.can_promote_members,
+            can_manage_chat=rights.can_manage_chat,
+        )
+    else:
+        # Group / supergroup: only group-applicable rights. Channel-only
+        # rights are omitted entirely so Telegram never rejects them.
+        kwargs = dict(
             is_anonymous=rights.is_anonymous,
             can_manage_chat=rights.can_manage_chat,
             can_delete_messages=rights.can_delete_messages,
@@ -166,32 +194,15 @@ async def promote_with_rights(bot, chat_id, user_id, rights: ChatAdministratorRi
             can_promote_members=rights.can_promote_members,
             can_change_info=rights.can_change_info,
             can_invite_users=rights.can_invite_users,
-            can_post_messages=rights.can_post_messages,
-            can_edit_messages=rights.can_edit_messages,
             can_pin_messages=rights.can_pin_messages,
-            can_post_stories=rights.can_post_stories,
-            can_edit_stories=rights.can_edit_stories,
-            can_delete_stories=rights.can_delete_stories,
             can_manage_topics=getattr(rights, "can_manage_topics", None),
         )
+    try:
+        await bot.promote_chat_member(chat_id, user_id, **kwargs)
+        return
     except Exception:
-        # Some bot accounts / chat types reject the can_manage_topics
-        # parameter (or any single param) with a 400. Retry once without
-        # it so promotion/demotion still works everywhere.
-        await bot.promote_chat_member(
-            chat_id, user_id,
-            is_anonymous=rights.is_anonymous,
-            can_manage_chat=rights.can_manage_chat,
-            can_delete_messages=rights.can_delete_messages,
-            can_manage_video_chats=rights.can_manage_video_chats,
-            can_restrict_members=rights.can_restrict_members,
-            can_promote_members=rights.can_promote_members,
-            can_change_info=rights.can_change_info,
-            can_invite_users=rights.can_invite_users,
-            can_post_messages=rights.can_post_messages,
-            can_edit_messages=rights.can_edit_messages,
-            can_pin_messages=rights.can_pin_messages,
-            can_post_stories=rights.can_post_stories,
-            can_edit_stories=rights.can_edit_stories,
-            can_delete_stories=rights.can_delete_stories,
-        )
+        # Some bot accounts / PTB builds reject can_manage_topics (or any
+        # single param) with a 400. Retry once without it so promotion /
+        # demotion still works everywhere.
+        kwargs.pop("can_manage_topics", None)
+        await bot.promote_chat_member(chat_id, user_id, **kwargs)
