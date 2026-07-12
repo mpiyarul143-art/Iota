@@ -1,0 +1,5 @@
+# Iota bot dependencies live in iota/requirements.txt (the bot code is in the
+# iota/ subpackage). Re-export them here so `pip install -r requirements.txt`
+# also works from the repo root (Render's build step previously looked for
+# this file at the root and failed with "Exited with status 1").
+-r iota/requirements.txt

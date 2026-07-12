@@ -3,7 +3,7 @@ services:
     name: iota-bot
     runtime: python
     plan: free
-    buildCommand: pip install -r requirements.txt && python3 -c "import sys; sys.path.insert(0,'iota'); from utils.font_manager import ensure_fonts; ensure_fonts()"
+    buildCommand: pip install -r iota/requirements.txt && python3 -c "import sys; sys.path.insert(0,'iota'); from utils.font_manager import ensure_fonts; ensure_fonts()"
     startCommand: sh start.sh
     healthCheckPath: /
     envVars:
