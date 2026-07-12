@@ -635,8 +635,9 @@ def main():
     # ── Dot/Bang Admin prefix ─────────────────────────────────────────
     app.add_handler(MessageHandler(
         filters.TEXT & filters.Regex(
-            r"^[.!](warn|unwarn|warns|mute|imute|dmute|unmute|ban|dban|"
-            r"unban|kick|promote|demote|unpromote|demote_all|add|remove|title|"
+        r"^[.!](warn|unwarn|warns|mute|imute|dmute|unmute|ban|dban|"
+        r"unban|kick|promote|demote|unpromote|demote_all|add|remove|title|"
+        r"whisper|"
             r"pin|unpin|d|help|adminlist|report|clearwarn|warnlimit|"
             r"tmute|tban|note|notes|delnote|clearnotes|purge)\b"
         ),

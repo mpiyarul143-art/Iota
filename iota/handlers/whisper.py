@@ -27,7 +27,12 @@ async def whisper_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if chat.type == "private":
         await msg.reply_html("❌ Whisper only works inside a group or supergroup."); return
 
-    await ensure_user(u.id, u.username or "", u.full_name)
+    # Best-effort: keep our user records fresh. A DB hiccup here must
+    # never block a whisper, so failures are swallowed.
+    try:
+        await ensure_user(u.id, u.username or "", u.full_name)
+    except Exception:
+        logger.debug("ensure_user failed in whisper", exc_info=True)
 
     # Resolve the target + the message text. Supports either:
     #   .whisper @user <message>      (named target)
@@ -38,8 +43,12 @@ async def whisper_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         target_mention = mention(tgt)
         text = " ".join(context.args or [])
     else:
-        target_id, target_mention, rest = await resolve_target(
-            update, context, list(context.args or []))
+        try:
+            target_id, target_mention, rest = await resolve_target(
+                update, context, list(context.args or []))
+        except Exception:
+            logger.debug("resolve_target failed in whisper", exc_info=True)
+            target_id, target_mention, rest = None, None, []
         text = " ".join(rest)
 
     if not target_id:
@@ -62,7 +71,13 @@ async def whisper_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_html(
             "❌ Write a message:\n<code>.whisper @user &lt;message&gt;</code>"); return
 
-    wid = await create_whisper(u.id, target_id, chat.id, text)
+    try:
+        wid = await create_whisper(u.id, target_id, chat.id, text)
+    except Exception:
+        logger.exception("create_whisper failed in whisper")
+        await msg.reply_html(
+            "❌ " + sc("Couldn't save your whisper — try again in a bit."))
+        return
 
     # Best-effort private delivery. If the target hasn't started the bot the
     # DM fails — that's fine, they still get the text via the "Read whisper"
