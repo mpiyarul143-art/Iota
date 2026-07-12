@@ -1,18 +1,63 @@
 """
-╔══════════════════════════════════════════════════════╗
-║  IOTA BOT — Global Error Handler                     ║
-║                                                        ║
-║  Catches unhandled exceptions in ANY command/handler  ║
-║  so a single bug never silently breaks a command —    ║
-║  the user always sees a friendly message instead of   ║
-║  the bot just not responding at all.                  ║
-╚══════════════════════════════════════════════════════╝
+╔══════════════════════════════════════════════════════════════════╗
+║  IOTA BOT — Global Error Handler                                 ║
+║                                                                    ║
+║  Catches unhandled exceptions in ANY command/handler so a single  ║
+║  bug never silently breaks a command — the user always sees a     ║
+║  friendly message instead of the bot just not responding.         ║
+║                                                                    ║
+║  🔴 DIAGNOSABILITY FIX: previously only a *database* failure was   ║
+║  reported to the owner, so a regular code bug (NameError,         ║
+║  AttributeError, BadRequest from the Telegram API, etc.) would    ║
+║  surface to users ONLY as a cold "Kuch gadbad ho gayi!" while the  ║
+║  owner got no signal at all about what/when/where broke. Now the   ║
+║  FULL traceback (command name + exception) is DM'd to the owner    ║
+║  on EVERY unhandled error, so "all my commands fail" becomes      ║
+║  "here is exactly which line threw for /chess".                   ║
+╚══════════════════════════════════════════════════════════════════╝
 """
 import logging
+import traceback
 from telegram import Update
 from telegram.ext import ContextTypes
 
 logger = logging.getLogger(__name__)
+
+
+def _db_issue(err) -> bool:
+    """True if `err` looks like a MongoDB / network connectivity failure."""
+    try:
+        import pymongo.errors as _pe
+        if isinstance(err, (_pe.PyMongoError,)):
+            return True
+    except Exception:
+        pass
+    err_str = str(err).lower()
+    return any(k in err_str for k in [
+        "serverselectiontimeout", "server selection", "connection refused",
+        "connection error", "connection timed out", "timed out", "timeout",
+        "econnrefused", "connrefused", "authentication failed",
+        "not authorized", "operationfailure", "no replica set members",
+        "network is unreachable", "ssl handshake", "certificate",
+        "getaddrinfo", "name or service not known", "no route to host",
+        "dns", "srv", "pymongo", "motor", "missing dependency",
+        # Telegram often wraps a dead DB in a generic network/gateway error
+        "timed out waiting for a reply", "gateway", "502", "503", "504",
+    ])
+
+
+def _command_name(update: object) -> str:
+    """Best-effort: which command (if any) triggered this update."""
+    try:
+        msg = getattr(update, "effective_message", None)
+        if msg and msg.text and msg.text.startswith("/"):
+            return msg.text.split()[0]
+        q = getattr(update, "callback_query", None)
+        if q and q.data:
+            return f"callback:{q.data[:40]}"
+    except Exception:
+        pass
+    return "?"
 
 
 async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
@@ -20,34 +65,32 @@ async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYP
     err = context.error
     logger.error(f"⚠️ Unhandled exception: {err}", exc_info=err)
 
-    # Detect DB connectivity / driver failures and give a clear hint.
-    # Be broad: match any pymongo/motor exception type AND a wide set of
-    # message substrings, because Mongo's error text varies a lot between
-    # "connection refused", "server selection timeout", "not authorized",
-    # TLS/cert errors, DNS/SRV resolution failures, etc. A real outage was
-    # previously being mis-classified as a generic "try again later" bug,
-    # hiding the actual cause from the owner.
-    db_issue = False
+    db_issue = _db_issue(err)
+
+    # ── Always tell the OWNER the real traceback so failures are
+    # diagnosable. (Previously this only happened for DB errors, leaving
+    # every other crash invisible to the person who can fix it.)
     try:
-        import pymongo.errors as _pe
-        if isinstance(err, (_pe.PyMongoError,)):
-            db_issue = True
+        from config import OWNER_ID
+        if OWNER_ID:
+            tb = "".join(traceback.format_exception(
+                type(err), err, err.__traceback__))[-3500:]
+            tag = _command_name(update)
+            head = (
+                "🔥 Iota crashed on a command!\n\n"
+                f"📛 {tag}\n"
+                f"❌ {type(err).__name__}: {str(err)[:300]}\n\n"
+                f"{tb}"
+            )
+            # Plain text (no parse_mode): a raw traceback contains '<' /
+            # '&' that would otherwise make an HTML message fail to send.
+            # Truncate to stay under Telegram's 4096-char message limit.
+            await context.bot.send_message(OWNER_ID, head[-4000:])
     except Exception:
         pass
-    if not db_issue:
-        err_str = str(err).lower()
-        db_issue = any(k in err_str for k in [
-            "serverselectiontimeout", "server selection", "connection refused",
-            "connection error", "connection timed out", "timed out", "timeout",
-            "econnrefused", "connrefused", "authentication failed",
-            "not authorized", "operationfailure", "no replica set members",
-            "network is unreachable", "ssl handshake", "certificate",
-            "getaddrinfo", "name or service not known", "no route to host",
-            "dns", "srv", "pymongo", "motor", "missing dependency",
-        ])
 
-    # On a DB issue, let the owner know once so they can fix MONGO_URI /
-    # MONGO_PASS instead of thinking every command is permanently broken.
+    # ── Notify the owner once on a confirmed DB outage (so they fix
+    # MONGO_URI / MONGO_PASS instead of thinking every command is broken).
     if db_issue:
         try:
             from config import OWNER_ID
@@ -57,7 +100,7 @@ async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYP
                     "🔌 <b>Iota DB Connection Issue!</b>\n\n"
                     f"<code>{str(err)[:500]}</code>\n\n"
                     "Check MONGO_URI / MONGO_PASS. DB-backed commands "
-                    "(/bal, /daily, /rob, /pay, …) will fail until fixed.",
+                    "(/bal, /daily, /rob, /pay, /ludo …) will fail until fixed.",
                     parse_mode="HTML",
                 )
         except Exception:

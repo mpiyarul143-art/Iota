@@ -19,15 +19,24 @@ _ALLOWED_TAG_RE = re.compile(
 
 def _escape_unsupported_tags(text: str) -> str:
     """
-    Escape any '<...>' that is NOT one of Telegram's allowed HTML tags, so
-    innocent usage placeholders like "<amount>" / "<model>" render as literal
-    text instead of crashing reply_html() with a BadRequest.
+    Make a string safe to send with Telegram HTML parse_mode. Two classes of
+    text that Telegram REJECTS with "BadRequest: Can't parse entities":
+
+      1. A '<...>' that is NOT one of Telegram's allowed HTML tags — innocent
+         usage placeholders like "<amount>" / "<model>" must render as literal
+         text, not be parsed as a (unsupported) tag.
+      2. A bare '&' that is NOT a valid HTML entity — e.g. "Terms & Refund",
+         "Challenges & Quests". Telegram only accepts &amp; &lt; &gt; &#NNN;
+         etc.; a stray '&' raises "can't parse entities" for the WHOLE
+         message.
 
     Allowed tags (and their attributes, e.g. <a href="...">) are preserved
     verbatim so bold/code/links keep working. Idempotent: already-escaped
-    entities (&lt; &gt;) contain no raw '<' so they pass straight through.
+    entities (&lt; &gt; &amp;) and entities like &#123; contain no raw '<'
+    so they pass straight through, and a '&' that already starts a valid
+    entity is left alone (never double-escaped).
     """
-    if "<" not in text:
+    if "<" not in text and "&" not in text:
         return text
     out = []
     i = 0
@@ -46,6 +55,13 @@ def _escape_unsupported_tags(text: str) -> str:
             else:
                 out.append("&lt;" + tag[1:-1].replace("<", "&lt;") + "&gt;")
             i = end + 1
+        elif c == "&":
+            rest = text[i + 1:]
+            if re.match(r"(?:[a-zA-Z]+|#\d+|#x[0-9a-fA-F]+);", rest):
+                out.append("&")                 # already a valid entity — keep
+            else:
+                out.append("&amp;")             # bare '&' — escape it
+            i += 1
         else:
             out.append(c)
             i += 1
@@ -129,7 +145,11 @@ def sc(text: str) -> str:
             out.append(part)          # command / model name — keep literal
         else:
             out.append("".join(_SC.get(c, c) for c in part))
-    return _escape_unsupported_tags("".join(out))
+    # NOTE: smallcaps only — NO entity escaping here. Escaping stray '<' /
+    # unescaped '&' into Telegram-safe form is done by `sc_all()` (used by the
+    # global outbound wrapper for HTML-mode sends). Doing it here would corrupt
+    # PLAIN-text replies (e.g. reply_text) by turning a literal '&' into '&amp;'.
+    return "".join(out)
 
 def bold_sc(text: str) -> str:
     """Smallcaps wrapped in HTML bold."""

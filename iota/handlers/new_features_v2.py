@@ -546,6 +546,10 @@ async def giveaway_join_callback(update: Update, context: ContextTypes.DEFAULT_T
 
 
 # ════════════════════════════════════════════════════════════════════
+# Lottery tuning — ticket price (coins) and per-ticket win probability.
+LOTTERY_TICKET_COST = 500       # coins to buy one ticket
+LOTTERY_WIN_CHANCE  = 0.02      # 2% chance to hit the jackpot per ticket
+
 @economy_gate
 async def lottery_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message; u = update.effective_user; chat = update.effective_chat

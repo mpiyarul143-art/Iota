@@ -39,19 +39,29 @@ def _install_smallcaps_output():
     - Length is preserved, so MessageEntity offsets stay valid.
     - Already-styled text passes through unchanged (idempotent).
     """
-    from utils.fonts import sc_out
+    from utils.fonts import sc, sc_all
     import functools, telegram
 
     def _wrap(orig, pos_index):
         @functools.wraps(orig)
         def wrapper(self, *args, **kwargs):
             args = list(args)
+            # Only HTML-mode sends need entity-safe escaping. Plain text and
+            # Markdown must keep their literal '<' / '&' (escaping them would
+            # render as "&amp;" / "&lt;" to the user). `sc_all` does both the
+            # smallcaps styling AND the Telegram HTML escaping (stray '<',
+            # unescaped '&', unsupported tags); `sc` does styling only.
+            # `reply_html` sets parse_mode="HTML" internally, so detect it by
+            # method name too — the kwarg alone isn't visible at wrap time.
+            is_html = (kwargs.get("parse_mode") == "HTML") or (orig.__name__ == "reply_html")
+            def _proc(t: str) -> str:
+                return sc_all(t) if is_html else sc(t)
             if pos_index is not None and pos_index < len(args) \
                and isinstance(args[pos_index], str):
-                args[pos_index] = sc_out(args[pos_index])
+                args[pos_index] = _proc(args[pos_index])
             for kw in ("text", "caption", "question"):
                 if kw in kwargs and isinstance(kwargs[kw], str):
-                    kwargs[kw] = sc_out(kwargs[kw])
+                    kwargs[kw] = _proc(kwargs[kw])
             return orig(self, *args, **kwargs)
         return wrapper
 
