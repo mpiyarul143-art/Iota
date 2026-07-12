@@ -20,12 +20,48 @@ async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYP
     err = context.error
     logger.error(f"⚠️ Unhandled exception: {err}", exc_info=err)
 
-    # Detect common DB connectivity failures and give a clear hint
-    err_str = str(err).lower()
-    db_issue = any(k in err_str for k in [
-        "serverselectiontimeout", "connection refused", "authentication failed",
-        "no replica set members", "network is unreachable", "ssl handshake",
-    ])
+    # Detect DB connectivity / driver failures and give a clear hint.
+    # Be broad: match any pymongo/motor exception type AND a wide set of
+    # message substrings, because Mongo's error text varies a lot between
+    # "connection refused", "server selection timeout", "not authorized",
+    # TLS/cert errors, DNS/SRV resolution failures, etc. A real outage was
+    # previously being mis-classified as a generic "try again later" bug,
+    # hiding the actual cause from the owner.
+    db_issue = False
+    try:
+        import pymongo.errors as _pe
+        if isinstance(err, (_pe.PyMongoError,)):
+            db_issue = True
+    except Exception:
+        pass
+    if not db_issue:
+        err_str = str(err).lower()
+        db_issue = any(k in err_str for k in [
+            "serverselectiontimeout", "server selection", "connection refused",
+            "connection error", "connection timed out", "timed out", "timeout",
+            "econnrefused", "connrefused", "authentication failed",
+            "not authorized", "operationfailure", "no replica set members",
+            "network is unreachable", "ssl handshake", "certificate",
+            "getaddrinfo", "name or service not known", "no route to host",
+            "dns", "srv", "pymongo", "motor", "missing dependency",
+        ])
+
+    # On a DB issue, let the owner know once so they can fix MONGO_URI /
+    # MONGO_PASS instead of thinking every command is permanently broken.
+    if db_issue:
+        try:
+            from config import OWNER_ID
+            if OWNER_ID:
+                await context.bot.send_message(
+                    OWNER_ID,
+                    "🔌 <b>Iota DB Connection Issue!</b>\n\n"
+                    f"<code>{str(err)[:500]}</code>\n\n"
+                    "Check MONGO_URI / MONGO_PASS. DB-backed commands "
+                    "(/bal, /daily, /rob, /pay, …) will fail until fixed.",
+                    parse_mode="HTML",
+                )
+        except Exception:
+            pass
 
     if not isinstance(update, Update):
         return

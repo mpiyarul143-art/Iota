@@ -100,6 +100,15 @@ def main():
 
     app = Application.builder().token(BOT_TOKEN).build()
 
+    # Install the Iota smallcaps output wrapper BEFORE any handler can send
+    # a message, so EVERY user-facing string is styled consistently. (This
+    # was previously defined but never invoked — leaving the bot's branded
+    # output system dead. See _install_smallcaps_output above.)
+    try:
+        _install_smallcaps_output()
+    except Exception as e:
+        logger.warning(f"⚠️ Failed to install smallcaps output wrapper: {e}")
+
     # ── Imports ───────────────────────────────────────────────────────
     from handlers.start        import start_cmd, help_cmd, menu_callback
     from handlers.economy      import (

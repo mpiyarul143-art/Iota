@@ -16,6 +16,12 @@ import unittest
 from unittest.mock import patch
 
 # ── Stub `config` BEFORE anything imports utils.mongo_db ───────────────────
+# IMPORTANT: restore the real `config` module immediately after the imports
+# below, otherwise the fake SimpleNamespace (which lacks OWNER_ID/BOT_TOKEN)
+# leaks into sys.modules["config"] and breaks every OTHER test in the suite
+# that does `from config import OWNER_ID`. This was the root cause of 19
+# unrelated test failures (cross-test pollution), not a banking bug.
+_orig_config = sys.modules.get("config")
 sys.modules["config"] = types.SimpleNamespace(
     MONGO_URI="mongodb://fake", DB_NAME="test"
 )
@@ -24,6 +30,12 @@ from bson import ObjectId  # noqa: E402
 
 import utils.mongo_db as mm  # noqa: E402
 from utils import banking_store as bs  # noqa: E402
+
+# Restore (or drop) the fake config so the rest of the suite is unaffected.
+if _orig_config is None:
+    sys.modules.pop("config", None)
+else:
+    sys.modules["config"] = _orig_config
 
 
 # ═══════════════════════════════════════════════════════════════════════════

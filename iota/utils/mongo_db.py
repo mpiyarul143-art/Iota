@@ -9,9 +9,23 @@ _connection_ok = None   # None=unknown, True/False after first check
 
 
 def get_db():
+    """Return the database handle, creating the motor client lazily.
+
+    Timeouts are set so a dead/unreachable MongoDB fails FAST and clearly
+    (instead of hanging for minutes) and surfaces as a clean "database
+    unavailable" error rather than a confusing generic crash. motor retries
+    dropped connections automatically, so a brief outage self-heals.
+    """
     global _client, _db
     if _db is None:
-        _client = AsyncIOMotorClient(MONGO_URI, serverSelectionTimeoutMS=8000)
+        _client = AsyncIOMotorClient(
+            MONGO_URI,
+            serverSelectionTimeoutMS=8000,   # give up selecting a node after 8s
+            connectTimeoutMS=10000,          # TCP connect timeout
+            socketTimeoutMS=20000,           # per-operation socket timeout
+            retryWrites=True,
+            maxPoolSize=50,
+        )
         _db = _client[DB_NAME]
     return _db
 
@@ -28,9 +42,12 @@ async def check_connection() -> bool:
         import logging
         logging.getLogger(__name__).error(
             f"❌ MongoDB connection FAILED: {e}\n"
-            f"👉 Fix this in config.py — set _MONGO_PASS to your real "
-            f"MongoDB Atlas password. Until fixed, /bal, /daily, /rob, "
-            f"/ludo and all other database-backed commands will not work."
+            f"👉 Fix this in the deploy env — set MONGO_URI (full Atlas "
+            f"connection string) or MONGO_PASS. Also confirm the Atlas "
+            f"cluster is running and its Network Access list allows "
+            f"connections (e.g. 'Allow Access From Anywhere'). Until fixed, "
+            f"/bal, /daily, /rob, /pay, /ludo and ALL other database-backed "
+            f"commands will fail with a database error."
         )
         return False
 
