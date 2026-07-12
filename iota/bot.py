@@ -88,6 +88,16 @@ def _install_smallcaps_output():
 
 
 def main():
+    # 🔴 Validate config BEFORE building the app so a missing MONGO_URI /
+    # BOT_TOKEN surfaces as one clear message instead of a cryptic crash
+    # later (e.g. inside /bal). Fail fast, fail loud.
+    try:
+        from utils.config_check import validate_config
+        validate_config()
+    except RuntimeError as e:
+        logger.error(str(e))
+        raise
+
     app = Application.builder().token(BOT_TOKEN).build()
 
     # ── Imports ───────────────────────────────────────────────────────
@@ -98,7 +108,7 @@ def main():
         gems_cmd, claim_cmd, coupons_cmd, create_coupon_cmd, coupon_cmd,
         del_coupon_cmd, coupon_status_cmd, economy_cmd, eco_callback,
         gbal_cmd, gkill_cmd, grob_cmd, grevive_cmd, gprotect_cmd,
-        gcheck_cmd, granks_cmd, auto_delete_handler, daily_remind_callback,
+        gcheck_cmd, granks_cmd, daily_remind_callback,
         auto_daily_job, weekly_cmd, monthly_cmd
     )
     from handlers.premium import (
@@ -211,7 +221,7 @@ def main():
         silentactions_cmd, admincache_cmd,
         setgoodbye_cmd, captcha_cmd,
         captcha_new_member_handler, captcha_callback,
-        announce_cmd, setlang_cmd,
+        setlang_cmd,
         approve_cmd, unapprove_cmd, approved_cmd
     )
     from handlers.ai_chat      import (
@@ -276,7 +286,7 @@ def main():
     # ── Banking system (canonical module) ────────────────────────────
     from handlers.banking import (
         bank_cmd, deposit_cmd, withdraw_cmd, loan_cmd, repay_cmd,
-        transfer_cmd, savings_cmd, networth_cmd, banking_maintenance_loop,
+        transfer_cmd, savings_cmd, networth_cmd,
     )
     from handlers.marketplace import bazaar_cmd
 
@@ -686,7 +696,7 @@ def main():
     app.add_handler(CallbackQueryHandler(welcome_panel_callback, pattern=r"^wset_"))
     app.add_handler(CallbackQueryHandler(werewolf_callback,      pattern=r"^ww_"))
     app.add_handler(CallbackQueryHandler(connect_callback,       pattern=r"^conn_"))
-    app.add_handler(CallbackQueryHandler(whisper_read_callback,   pattern=r"^wsp_read_"))
+    app.add_handler(CallbackQueryHandler(whisper_read_callback,   pattern=r"^wsp:"))
     app.add_handler(CallbackQueryHandler(riddle_reveal_callback, pattern=r"^riddle_ans:"))
     app.add_handler(CallbackQueryHandler(giveaway_join_callback, pattern=r"^ga_join:"))
     app.add_handler(CallbackQueryHandler(join_request_callback, pattern=r"^jr_"))
@@ -1027,6 +1037,10 @@ def main():
         # its own /health route (prevents the 15-min inactivity spin-down
         # that would otherwise kill the long-poll bot too).
         asyncio.create_task(_render_keepalive_job())
+
+        # 🎲 Sweep abandoned game lobbies so in-memory state can't leak.
+        from utils.game_lobby import lobby_expiry_job
+        asyncio.create_task(lobby_expiry_job(application.bot))
 
         # 🎲 Ludo Mini App web server — runs in-process, no separate
         # hosting needed. Only warns (doesn't crash the bot) if it fails

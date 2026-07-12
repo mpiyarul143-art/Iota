@@ -16,10 +16,13 @@ from utils.mongo_db import (
 from utils.helpers import mention, resolve_target
 from utils.safe_html import safe_html
 from utils.fonts import sc, sc_all
+from utils.callback_codec import encode_callback, decode_callback
+from utils.ratelimit import ratelimit
 
 logger = logging.getLogger(__name__)
 
 
+@ratelimit("whisper", limit=12, window=20)
 async def whisper_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user
     msg = update.effective_message
@@ -92,7 +95,8 @@ async def whisper_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pass
 
     kb = InlineKeyboardMarkup([[
-        InlineKeyboardButton("✉️ " + sc("Read whisper"), callback_data=f"wsp_read_{wid}")
+        InlineKeyboardButton("✉️ " + sc("Read whisper"),
+                             callback_data=encode_callback("wsp", {"w": wid}))
     ]])
     await msg.reply_html(
         sc_all(f"💬 {mention(u)} whispered to {target_mention} 🤫"),
@@ -102,7 +106,10 @@ async def whisper_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def whisper_read_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
-    wid = q.data[len("wsp_read_"):]
+    payload = decode_callback(q.data, "wsp")
+    if not payload or "w" not in payload:
+        await q.answer("❌ Invalid whisper button.", show_alert=True); return
+    wid = payload["w"]
     w = await get_whisper(wid)
     if not w:
         await q.answer("❌ Whisper not found.", show_alert=True); return
