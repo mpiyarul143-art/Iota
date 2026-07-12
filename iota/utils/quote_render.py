@@ -535,7 +535,8 @@ def _reply_placeholder(card, thumb, tx, ty, pal):
 # ── Main entrypoint ──────────────────────────────────────────────────────
 def render_quote_card(messages, avatar_bytes, theme="dark", mode="sticker",
                       reply_preview=None, timestamp=None, border=True,
-                      border_width=None, border_color=None):
+                      border_width=None, border_color=None,
+                      scale=1.0, crop=False, emoji_brand=None, privacy=False):
     """Render a polished quote card. See module docstring for params.
 
     The card is sized dynamically: its width follows the content (clamped to
@@ -546,7 +547,11 @@ def render_quote_card(messages, avatar_bytes, theme="dark", mode="sticker",
 
     pal = _parse_theme(theme)
     primary = messages[0]
-    name = _normalize_unicode((primary.get("name") or "User").strip()) or "User"
+    if privacy:
+        name = "Anonymous"
+        avatar_bytes = None
+    else:
+        name = _normalize_unicode((primary.get("name") or "User").strip()) or "User"
     single = len(messages) == 1
 
     if single:
@@ -737,11 +742,33 @@ def render_quote_card(messages, avatar_bytes, theme="dark", mode="sticker",
         draw.text((card_w - pad - tw, card_h - bot_pad - ts_size),
                   timestamp, font=ts_font, fill=pal["ts"])
 
+    # Emoji brand (bottom-right corner, optional — quote-bot "emoji brand").
+    if emoji_brand and len(emoji_brand) <= 4:
+        try:
+            ebsize = 22 * SCALE
+            eimg = _render_emoji_glyph(emoji_brand, _pick_emoji_font(), ebsize)
+            if eimg is not None:
+                ex = int(card_w - pad - ebsize)
+                ey = int(card_h - bot_pad - ebsize)
+                card.paste(eimg, (ex, ey), eimg)
+        except Exception as e:
+            logger.debug(f"emoji brand draw failed: {e}")
+
     # Composite card onto the canvas, then downscale (HiDPI → AA).
     canvas.paste(card, (card_x, card_y), card)
     out_w = int(canvas_w / SCALE)
     out_h = int(canvas_h / SCALE)
     final = canvas.resize((out_w, out_h), Image.LANCZOS)
+
+    # Optional crop: trim the surrounding transparent margin (shadow/M padding).
+    if crop:
+        try:
+            bbox = final.getbbox()
+            if bbox:
+                final = final.crop(bbox)
+                out_w, out_h = final.size
+        except Exception:
+            pass
 
     buf = io.BytesIO()
     if mode == "sticker":
@@ -751,5 +778,12 @@ def render_quote_card(messages, avatar_bytes, theme="dark", mode="sticker",
         sq.paste(final, (paste_x, paste_y), final)
         sq.save(buf, format="WEBP", lossless=True)
     else:
+        # Optional hi-res scale (stickers stay fixed 512, so scale is PNG-only).
+        if scale and scale != 1.0:
+            try:
+                final = final.resize((max(1, int(out_w * scale)),
+                                      max(1, int(out_h * scale))), Image.LANCZOS)
+            except Exception:
+                pass
         final.save(buf, format="PNG")
     return buf.getvalue()

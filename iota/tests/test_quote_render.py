@@ -103,6 +103,36 @@ class QuoteRenderTest(unittest.TestCase):
         for ch in ("\u21bb", "\u2713", "\u2600", "\u2766"):
             self.assertTrue(_has_glyph(dj, ch))
 
+    def test_scale_png(self):
+        from PIL import Image
+        normal = render_quote_card([{"name": "Al", "text": "hello"}], None,
+                                   mode="png")
+        scaled = render_quote_card([{"name": "Al", "text": "hello"}], None,
+                                   mode="png", scale=2.0)
+        self.assertGreater(Image.open(__import__("io").BytesIO(scaled)).size[0],
+                           Image.open(__import__("io").BytesIO(normal)).size[0])
+
+    def test_crop_png(self):
+        out = render_quote_card([{"name": "Al", "text": "hi"}], None,
+                                mode="png", crop=True)
+        self.assertTrue(out.startswith(b"\x89PNG"))
+
+    def test_privacy_anonymises(self):
+        out = render_quote_card([{"name": "Secret", "text": "hidden sender"}],
+                                b"x", mode="png", privacy=True)
+        self.assertTrue(out.startswith(b"\x89PNG"))
+
+    def test_emoji_brand(self):
+        out = render_quote_card([{"name": "Al", "text": "branded"}], None,
+                                mode="png", emoji_brand="\U0001F49C")
+        self.assertGreater(len(out), 1000)
+
+    def test_scale_ignored_for_sticker(self):
+        from PIL import Image
+        st = render_quote_card([{"name": "Al", "text": "hi"}], None,
+                               mode="sticker", scale=2.0)
+        self.assertEqual(Image.open(__import__("io").BytesIO(st)).size, (512, 512))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -21,7 +21,7 @@
 |-------|--------|-------|
 | Small-caps text style | ✅ done | `bot.py:_install_smallcaps_output` wraps every user-facing string via `utils/fonts.sc_out` (tag/URL/entity aware). Games must reuse this; do NOT roll a new casing system. |
 | Text-game UI kit | ✅ partial | `utils/game_ui.py` → `banner`, `medal`, `progress_bar`, `result_card`, `send_gif_result`, `back_button`. Good base, needs more primitives. |
-| PNG rendering | ✅ proof | `utils/quote_render.py` (Pillow + NotoColorEmoji color glyphs, segmented emoji/text draw). Reuse as the engine for ALL game art. |
+| PNG rendering | ✅ done | `utils/quote_render.py` (Pillow + NotoColorEmoji color glyphs, segmented emoji/text draw). Reuse as the engine for ALL game art. |
 | Fonts | ✅ done | `utils/font_manager.py` + `utils/fonts.py` load Noto Sans / Devanagari / ColorEmoji. |
 | Ludo Mini App | ✅ done | `webapp/ludo/` (HTML/CSS/JS) + `webapp/ludo_server.py` (aiohttp + WebSocket). The reference pattern for future Mini Apps. |
 | Games (text/inline) | ✅ many | card, bet, bomb, wordgame, dice, slots, roulette, wheel, bluff, hack, tictactoe, rps, hangman, quiz, truth/dare, werewolf, ludo(chat). |
