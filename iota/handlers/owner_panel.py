@@ -11,7 +11,7 @@
 ║      the command going silently unresponsive.                  ║
 ╚══════════════════════════════════════════════════════╝
 """
-import asyncio, time, logging, traceback, functools
+import asyncio, time, logging, traceback, functools, io
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import ContextTypes
 from telegram.error import RetryAfter, Forbidden, BadRequest, TelegramError
@@ -159,7 +159,12 @@ async def owner_panel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"/previewsticker {placeholder('mood')} — Preview one\n"
         f"/clearstickers {placeholder('mood')} — Wipe a pack\n\n"
         f"<b>🔊 Voice/TTS:</b>\n"
-        f"/ttssettings — Configure TTS model, speaker, speed, pitch\n\n"
+        f"/ttssettings — Configure TTS model, voice, speed, temperature\n"
+        f"/ttsvoices — List all voices (auto-fetched from Sarvam)\n"
+        f"/ttsrefresh — Refresh the live voice list\n"
+        f"/clonevoice — Reply to audio + /clonevoice &lt;name&gt; (voice cloning)\n"
+        f"/clonedvoices /delclone — Manage cloned voices\n"
+        f"/previewtts {placeholder('text')}\n\n"
         f"<b>🗑️ Broadcast History:</b>\n"
         f"/broadcasthistory — Last 20 broadcasts/announces\n"
         f"/delbroadcast {placeholder('id')} [chat_id] — Delete one, everywhere or one chat\n\n"
@@ -1458,29 +1463,32 @@ async def clearstickers_cmd(update, context):
 # ═══════════════════════════════════════════════════════════════════════════
 
 def _tts_panel_text() -> str:
-    from utils.sarvam import get_tts_config
+    from utils.tts_engine import get_tts_config, voice_display
     cfg = get_tts_config()
     return (
-        f"🔊 <b>Voice/TTS Settings</b>\n\n"
+        f"🔊 <b>Voice/TTS Settings</b> (Sarvam Bulbul v3)\n\n"
         f"🤖 Model: <code>{cfg['model']}</code>\n"
-        f"🗣️ Speaker: <code>{cfg['speaker']}</code>\n"
+        f"🗣️ Speaker: <code>{safe_html(voice_display(cfg['speaker']))}</code>\n"
         f"⚡ Pace (speed): <code>{cfg['pace']}</code>  (0.5 slow – 2.0 fast)\n"
-        f"🎵 Pitch: <code>{cfg['pitch']}</code>  (-20 – 20)\n"
-        f"🔉 Loudness: <code>{cfg['loudness']}</code>  (0.5 – 2.0)\n\n"
+        f"🌡️ Temperature: <code>{cfg['temperature']}</code>  (0.01 – 1.0)\n"
+        f"🎚️ Sample rate: <code>{cfg['sample_rate']}</code> Hz\n\n"
         f"Change with:\n"
-        f"<code>/ttssettings speaker anushka</code>\n"
+        f"<code>/ttssettings speaker priya</code>\n"
         f"<code>/ttssettings pace 1.2</code>\n"
-        f"<code>/ttssettings pitch 2</code>\n"
-        f"<code>/ttssettings loudness 1.8</code>\n\n"
-        f"Valid speakers: anushka, manisha, vidya, arya, abhilash, karun, hitesh\n"
+        f"<code>/ttssettings temperature 0.7</code>\n"
+        f"<code>/ttssettings sample_rate 32000</code>\n\n"
+        f"📜 <b>Voices</b>: /ttsvoices  (auto-fetched from Sarvam)\n"
+        f"🔄 <b>Refresh list</b>: /ttsrefresh\n"
+        f"🧬 <b>Clone a voice</b>: reply to a voice/audio + /clonevoice &lt;name&gt;\n"
+        f"📚 <b>Cloned voices</b>: /clonedvoices  ·  🗑️ /delclone &lt;id&gt;\n"
         f"Test it: /previewtts {placeholder('text')}"
     )
 
 
 @owner_only
 async def ttssettings_cmd(update, context):
-    """Owner: view or change Iota's voice/TTS defaults (model, speaker, speed, pitch, loudness)."""
-    from utils.sarvam import set_tts_setting, save_tts_config_db
+    """Owner: view or change Iota's voice/TTS defaults (model, speaker, speed, temperature, sample rate)."""
+    from utils.tts_engine import set_tts_setting, save_tts_config_db
     args = context.args
     if len(args) < 2:
         await update.message.reply_html(_tts_panel_text()); return
@@ -1497,16 +1505,149 @@ async def ttssettings_cmd(update, context):
 @owner_only
 async def previewtts_cmd(update, context):
     """Owner: preview the current TTS settings with a sample line."""
-    from utils.sarvam import text_to_speech
+    from utils.tts_engine import text_to_speech
     text = " ".join(context.args) if context.args else "Hii, main Iota hoon! Ye meri current voice hai."
     thinking = await update.message.reply_html("🔊 Generating preview...")
-    audio = await text_to_speech(text[:300])
+    audio = await text_to_speech(text[:2500])
     if not audio:
         await thinking.edit_text("❌ TTS generation failed — check the bot's logs for details."); return
     import io
     af = io.BytesIO(audio); af.name = "preview.wav"
     await thinking.delete()
     await update.message.reply_voice(af, caption=f"🔊 Preview: {safe_html(text[:100])}")
+
+
+@owner_only
+async def ttsvoices_cmd(update, context):
+    """Owner: list every available voice (auto-fetched), male/female split."""
+    from utils.tts_engine import get_voices, get_voices_source
+    voices = get_voices()
+    male = [v for v in voices if v.get("gender") == "male"]
+    female = [v for v in voices if v.get("gender") == "female"]
+    cloned = [v for v in voices if v.get("tier") == "cloned"]
+    src = get_voices_source()
+
+    def _chunk(items):
+        return ", ".join(v["id"] for v in items) or "—"
+
+    text = (
+        f"🗣️ <b>Iota Voices</b> (source: {safe_html(src)})\n\n"
+        f"👨 Male ({len(male)}): {_chunk(male)}\n\n"
+        f"👩 Female ({len(female)}): {_chunk(female)}\n"
+    )
+    if cloned:
+        text += f"\n🧬 Cloned ({len(cloned)}): {_chunk(cloned)}\n"
+    text += (
+        f"\nTotal: <b>{len(voices)}</b> voices.\n"
+        f"Set default: /ttssettings speaker &lt;id&gt;\n"
+        f"Refresh from API: /ttsrefresh"
+    )
+    await update.message.reply_html(text)
+
+
+@owner_only
+async def ttsrefresh_cmd(update, context):
+    """Owner: force a fresh fetch of the live voice catalogue from Sarvam."""
+    from utils.tts_engine import fetch_voices, get_voices, get_voices_source
+    status = await update.message.reply_html("🔄 Fetching live voices from Sarvam...")
+    voices = await fetch_voices(force=True)
+    await status.edit_text(
+        f"✅ <b>Voice list refreshed!</b>\n\n"
+        f"Source: {safe_html(get_voices_source())}\n"
+        f"Total voices available: <b>{len(get_voices())}</b> "
+        f"(fetched {len(voices)} from API).",
+        parse_mode="HTML"
+    )
+
+
+@owner_only
+async def clonedvoices_cmd(update, context):
+    """Owner: list cloned custom voices."""
+    from utils.tts_engine import get_cloned_voices
+    cloned = get_cloned_voices()
+    if not cloned:
+        await update.message.reply_html(
+            "🧬 No cloned voices yet.\n\n"
+            "Reply to a voice/audio message and send:\n"
+            "<code>/clonevoice &lt;name&gt;</code>"
+        ); return
+    text = "🧬 <b>Cloned Voices</b>\n\n"
+    for v in cloned:
+        when = time.strftime('%d/%m/%Y', time.localtime(v.get("created_at", 0)))
+        text += f"• <code>{safe_html(v['id'])}</code> — {safe_html(v.get('name',''))} ({when})\n"
+    text += "\nUse: /ttssettings speaker &lt;id&gt;  ·  Delete: /delclone &lt;id&gt;"
+    await update.message.reply_html(text)
+
+
+@owner_only
+async def delclone_cmd(update, context):
+    """Owner: delete a cloned voice by id."""
+    from utils.tts_engine import delete_cloned_voice, get_cloned_voices
+    if not context.args:
+        await update.message.reply_html(
+            "🗑️ Usage: /delclone &lt;voice_id&gt;\n"
+            "List cloned voices: /clonedvoices"
+        ); return
+    vid = context.args[0].strip().lower()
+    if vid not in {v["id"] for v in get_cloned_voices()}:
+        await update.message.reply_html(f"❌ No cloned voice with id <code>{safe_html(vid)}</code>."); return
+    ok = await delete_cloned_voice(vid)
+    if ok:
+        await update.message.reply_html(f"🗑️ Cloned voice <code>{safe_html(vid)}</code> deleted!")
+    else:
+        await update.message.reply_html(f"❌ Could not delete <code>{safe_html(vid)}</code>.")
+
+
+@owner_only
+async def clonevoice_cmd(update, context):
+    """
+    Owner: clone a custom voice from an audio sample.
+
+    Reply to a Telegram voice/audio message and run:
+        /clonevoice <name>
+
+    The sample is sent to Sarvam's consent-based voice-cloning API. On success
+    the new voice id is registered and can be used as the speaker (e.g.
+    /ttssettings speaker <id> or /voice <id> hello).
+    """
+    from utils.tts_engine import clone_voice
+    reply = update.message.reply_to_message
+    if not reply or not (reply.voice or reply.audio):
+        await update.message.reply_html(
+            "🧬 <b>Clone a voice</b>\n\n"
+            "Reply to a <b>voice</b> or <b>audio</b> message, then:\n"
+            "<code>/clonevoice &lt;name&gt;</code>\n\n"
+            "Tip: use a clean 15–60s clip of a single speaker."
+        ); return
+    if not context.args:
+        await update.message.reply_html("❌ Give the cloned voice a name: /clonevoice &lt;name&gt;"); return
+    name = " ".join(context.args)
+
+    media = reply.voice or reply.audio
+    status = await update.message.reply_html(f"🧬 Cloning voice “{safe_html(name)}”…")
+    try:
+        f = await context.bot.get_file(media.file_id)
+        bio = io.BytesIO()
+        await f.download_to_memory(bio)
+        audio_bytes = bio.getvalue()
+    except Exception as e:
+        await status.edit_text(f"❌ Could not download the sample: {safe_html(str(e))}", parse_mode="HTML"); return
+
+    ok, result = await clone_voice(
+        name, audio_bytes,
+        filename=getattr(media, "file_name", "sample.ogg") or "sample.ogg",
+        owner_id=update.effective_user.id,
+    )
+    if not ok:
+        await status.edit_text(f"❌ Voice clone failed:\n<code>{safe_html(result)}</code>", parse_mode="HTML"); return
+    await status.edit_text(
+        f"✅ Voice cloned!\n\n"
+        f"🆔 ID: <code>{safe_html(result)}</code>\n"
+        f"👤 Name: {safe_html(name)}\n\n"
+        f"Use it now: /ttssettings speaker {safe_html(result)}\n"
+        f"Or: /voice {safe_html(result)} hello world",
+        parse_mode="HTML"
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════

@@ -10,7 +10,9 @@ from utils.mongo_db import (ensure_user, get_user, get_user_rank,
                              add_referral)
 from utils.helpers import mention, mention_id, fmt, ts
 from utils.fonts import sc
-from utils.sarvam import translate, text_to_speech
+from utils.sarvam import translate
+from utils.tts_engine import (text_to_speech, is_valid_voice,
+                             get_tts_config, voice_display)
 from config import OWNER_ID, OWNER_USERNAME
 
 LANG_MAP = {
@@ -18,14 +20,13 @@ LANG_MAP = {
     "mr":"mr-IN","ta":"ta-IN","gu":"gu-IN","kn":"kn-IN",
     "ml":"ml-IN","pa":"pa-IN","or":"or-IN","ur":"ur-IN",
 }
-SPEAKER_MAP = {
-    # 🔴 FIXED: "meera" was never a valid Sarvam speaker name for any
-    # model — this made every Hindi /voice request fail. Valid bulbul:v2
-    # speakers are: anushka, manisha, vidya, arya (female), abhilash,
-    # karun, hitesh (male). Using "anushka" everywhere for consistency
-    # and because it's the well-supported default voice.
-    "hi":"anushka","en":"anushka","bn":"anushka","te":"anushka",
-    "mr":"anushka","ta":"anushka","gu":"anushka",
+# A sensible default voice per language (Bulbul v3 recommended picks from the
+# Sarvam docs). If the owner set a global default via /ttssettings it is used
+# instead unless the user overrides with an explicit voice id.
+LANG_DEFAULT_VOICE = {
+    "hi-IN":"shubh","en-IN":"ratan","bn-IN":"rehan","te-IN":"shubh",
+    "mr-IN":"ratan","ta-IN":"ratan","gu-IN":"ratan","kn-IN":"shubh",
+    "ml-IN":"shubh","pa-IN":"mani","od-IN":"shubh","ur-IN":"shubh",
 }
 
 # ── /tr ───────────────────────────────────────────────────────────────────────
@@ -64,24 +65,32 @@ async def voice_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_html(
             f"🎙️ {sc('Usage')}: /voice <{sc('text')}>\n"
             f"{sc('Or')}: /voice hi <{sc('Hindi text')}>\n"
-            f"{sc('Langs')}: hi en bn te mr ta gu kn ml pa"
+            f"{sc('Or')}: /voice <{sc('voice')}> <{sc('text')}>  (e.g. /voice priya hello)\n"
+            f"{sc('Langs')}: hi en bn te mr ta gu kn ml pa\n"
+            f"{sc('Browse voices')}: /ttsvoices"
         ); return
     if msg.reply_to_message and msg.reply_to_message.text and not args:
-        text = msg.reply_to_message.text; lang_key = "en"
+        text = msg.reply_to_message.text; lang_key = "en"; speaker = None
     elif args and args[0].lower() in LANG_MAP and len(args) > 1:
-        lang_key = args[0].lower(); text = " ".join(args[1:])
+        lang_key = args[0].lower(); text = " ".join(args[1:]); speaker = None
+    elif args and is_valid_voice(args[0]):
+        # Explicit voice override: /voice priya hello world
+        speaker = args[0].lower(); text = " ".join(args[1:]); lang_key = "en"
     else:
-        lang_key = "en"; text = " ".join(args)
+        lang_key = "en"; text = " ".join(args); speaker = None
     if not text.strip(): await msg.reply_html("❌ No text!"); return
     lang_code = LANG_MAP.get(lang_key, "en-IN")
-    speaker   = SPEAKER_MAP.get(lang_key, "anushka")
+    if speaker is None:
+        # Use the owner-configured default unless we have a per-language pick.
+        cfg = get_tts_config()
+        speaker = LANG_DEFAULT_VOICE.get(lang_code, cfg["speaker"])
     thinking  = await msg.reply_html(f"🎙️ {sc('Generating voice')}...")
     try:
-        audio_bytes = await text_to_speech(text[:500], lang_code, speaker)
+        audio_bytes = await text_to_speech(text[:2500], lang_code, speaker)
         if audio_bytes:
             af = io.BytesIO(audio_bytes); af.name = "voice.wav"
             await thinking.delete()
-            await msg.reply_voice(af, caption=f"🔊 {text[:80]}")
+            await msg.reply_voice(af, caption=f"🔊 {voice_display(speaker)} — {text[:80]}")
         else:
             await thinking.edit_text(
                 f"❌ {sc('TTS failed!')} Sarvam API returned no audio — "

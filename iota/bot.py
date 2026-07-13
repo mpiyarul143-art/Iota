@@ -259,6 +259,7 @@ def main():
         premiumlist_cmd, userslist_cmd,
         addsticker_cmd, addstickerpack_cmd, addpack_cmd, stickerpacks_cmd, previewsticker_cmd, clearstickers_cmd,
         ttssettings_cmd, previewtts_cmd, delbroadcast_cmd, broadcasthistory_cmd,
+        ttsvoices_cmd, ttsrefresh_cmd, clonevoice_cmd, clonedvoices_cmd, delclone_cmd,
         announce_cmd as owner_announce_cmd,
         globalclose_cmd, globalopen_cmd, premiumgiveaway_cmd,
         refreshmodels_cmd, setmaxtokens_cmd, addapikey_cmd,
@@ -694,6 +695,9 @@ def main():
         ("addsticker",addsticker_cmd),("addstickerpack",addstickerpack_cmd),("addpack",addpack_cmd),("stickerpacks",stickerpacks_cmd),
         ("previewsticker",previewsticker_cmd),("clearstickers",clearstickers_cmd),
         ("ttssettings",ttssettings_cmd),("previewtts",previewtts_cmd),
+        ("ttsvoices",ttsvoices_cmd),("ttsrefresh",ttsrefresh_cmd),
+        ("clonevoice",clonevoice_cmd),("clonedvoices",clonedvoices_cmd),
+        ("delclone",delclone_cmd),
         ("delbroadcast",delbroadcast_cmd),("broadcasthistory",broadcasthistory_cmd),
         ("globalclose",globalclose_cmd),("globalopen",globalopen_cmd),
         ("premiumgiveaway",premiumgiveaway_cmd),
@@ -1096,10 +1100,15 @@ def main():
         await create_indexes()
         await load_model_config_db()
         try:
-            from utils.sarvam import load_tts_config_db
+            from utils.tts_engine import load_tts_config_db, load_voices_db, fetch_voices
             await load_tts_config_db()
+            await load_voices_db()
+            # Auto-fetch the live voice catalogue in the background so the
+            # very first /voice or /ttsvoices uses the freshest list (and so
+            # voice cloning works even if the DB had no cached list).
+            asyncio.create_task(fetch_voices(force=False))
         except Exception as e:
-            logger.warning(f"Failed to load TTS config from DB (using defaults): {e}")
+            logger.warning(f"Failed to load TTS config/voices from DB (using defaults): {e}")
         # Background jobs
         # 🔴 FIX: a previous commit removed the `protection_alert_job`
         # call from here because it was undefined — but the REAL job

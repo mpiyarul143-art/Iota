@@ -85,9 +85,14 @@ else:
 DB_NAME = _env("DB_NAME", "iota_bot")
 
 # ── Sarvam (TTS) ──────────────────────────────────────────────────────────
-SARVAM_API_KEY  = _env("SARVAM_API_KEY", "")
-SARVAM_CHAT_URL = _env("SARVAM_CHAT_URL", "https://api.sarvam.ai/v1/chat/completions")
-SARVAM_TTS_URL  = _env("SARVAM_TTS_URL", "https://api.sarvam.ai/text-to-speech")
+# Bulbul v3 is the current TTS model (37 voices: 23 male + 14 female).
+# `tts_engine.py` also auto-fetches the live voice catalogue from SARVAM_VOICES_URL
+# and clones custom voices via SARVAM_TTS_CLONE_URL — both overridable here.
+SARVAM_API_KEY       = _env("SARVAM_API_KEY", "")
+SARVAM_CHAT_URL      = _env("SARVAM_CHAT_URL", "https://api.sarvam.ai/v1/chat/completions")
+SARVAM_TTS_URL       = _env("SARVAM_TTS_URL", "https://api.sarvam.ai/text-to-speech")
+SARVAM_VOICES_URL    = _env("SARVAM_VOICES_URL", "https://api.sarvam.ai/voices")
+SARVAM_TTS_CLONE_URL = _env("SARVAM_TTS_CLONE_URL", "https://api.sarvam.ai/text-to-speech/clone")
 
 # ── AI Providers ──────────────────────────────────────────────────────────
 # Provide keys as a single space/comma/newline-joined string in each env var.
