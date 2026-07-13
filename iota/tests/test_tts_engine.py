@@ -260,5 +260,34 @@ class TestCloneVoice(unittest.TestCase):
         self.assertNotIn("clone_x", eng.get_voice_ids())
 
 
+class TestLoadConfigForcesV3(unittest.TestCase):
+    def test_stale_v2_model_is_forced_to_v3(self):
+        # Simulate a config doc left behind by the OLD bulbul:v2 code.
+        stale = {"_id": "tts_settings", "model": "bulbul:v2",
+                 "speaker": "anushka", "pace": 1.0,
+                 "temperature": 0.6, "sample_rate": 22050}
+
+        class _FakeColl:
+            def find_one(self, *a, **k):
+                return _maybe_await(stale)
+            def update_one(self, *a, **k):
+                return _maybe_await(MagicMock())
+
+        class _FakeDB:
+            bot_config = _FakeColl()
+
+        async def _maybe_await(v):
+            return v
+
+        with patch("utils.mongo_db.get_db", return_value=_FakeDB()), \
+             patch("utils.tts_engine.load_cloned_voices_db", new=AsyncMock()):
+            _run(eng.load_tts_config_db())
+
+        # Model MUST be forced to v3 (the only supported model) and the
+        # v2-only speaker must be reset to a valid v3 voice.
+        self.assertEqual(eng.get_tts_config()["model"], "bulbul:v3")
+        self.assertIn(eng.get_tts_config()["speaker"], eng.get_voice_ids())
+
+
 if __name__ == "__main__":
     unittest.main()

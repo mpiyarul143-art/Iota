@@ -347,6 +347,16 @@ async def load_tts_config_db():
         for k in ("model", "speaker", "pace", "temperature", "sample_rate"):
             if k in doc:
                 _tts_config[k] = doc[k]
+    # The engine only supports Bulbul v3 now (37 voices). A config persisted
+    # by the OLD bulbul:v1/v2 code can carry a stale "bulbul:v2" model, which
+    # is incompatible with the v3 speakers (e.g. "ratan") and makes every
+    # /voice fail with a 400. Force v3 so a stale DB value can never break TTS.
+    if _tts_config["model"] != DEFAULT_MODEL:
+        _tts_config["model"] = DEFAULT_MODEL
+        try:
+            await save_tts_config_db()
+        except Exception:
+            pass
     # Clamp loaded values through validation so a stale DB value can't break TTS.
     for k in ("pace", "temperature", "sample_rate"):
         ok, _ = set_tts_setting(k, _tts_config[k])
