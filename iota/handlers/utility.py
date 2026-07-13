@@ -103,7 +103,6 @@ async def voice_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 msg_txt += " Check the bot's logs for details."
             await thinking.edit_text(msg_txt, parse_mode="HTML")
     except Exception as e:
-        from utils.safe_html import safe_html
         try:
             await thinking.edit_text(f"❌ {sc('Voice error')}: {safe_html(e)}", parse_mode="HTML")
         except Exception:

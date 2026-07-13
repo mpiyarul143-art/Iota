@@ -114,7 +114,19 @@ async def ensure_single_instance(application) -> None:
     primary instance. Only the primary ever reaches run_polling, so a
     Conflict can never occur. Secondaries wait and take over if the primary
     dies — so the bot stays up with zero manual intervention.
+
+    This function is wrapped so it can NEVER raise: if anything unexpected
+    happens (DB blip, attribute quirk, etc.) we fall through as the primary
+    rather than letting an exception bubble up and disable the lock for BOTH
+    instances (which would let them both poll and trigger the Conflict).
     """
+    try:
+        await _ensure_single_instance_inner(application)
+    except Exception as e:  # pragma: no cover - defensive
+        logger.warning(f"⚠️ ensure_single_instance errored ({e}); proceeding as primary.")
+
+
+async def _ensure_single_instance_inner(application) -> None:
     my_id = uuid.uuid4().hex
     while True:
         if await _try_acquire(my_id):

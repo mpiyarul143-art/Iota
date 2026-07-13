@@ -1237,7 +1237,38 @@ def main():
 
     # The cross-instance dedup collection's TTL index is created lazily on
     # first use (see _dedup_update) so we don't need an async context here.
-    app.run_polling(drop_pending_updates=True)
+
+    # ── Crash-proof polling loop ──────────────────────────────────────────
+    # If a SECOND process is somehow polling the same token (a stale pre-fix
+    # instance left alive by the host, or a second scaled deployment),
+    # Telegram aborts with a 409 Conflict. We must NOT let that hard-crash
+    # the bot or spam the owner. Instead: log it, back off, and re-run
+    # run_polling (which re-runs post_init → re-checks the single-instance
+    # lock). The instance that legitimately owns the lock keeps polling;
+    # the other waits, so the bot stays up and self-heals once the stray
+    # instance is gone. Only a clean stop exits the loop.
+    from telegram.error import Conflict, TerminatedByOtherGetUpdates
+    while True:
+        try:
+            app.run_polling(drop_pending_updates=True)
+            break  # clean shutdown
+        except (Conflict, TerminatedByOtherGetUpdates) as e:
+            logger.warning(
+                "⚠️ Telegram Conflict during polling (another getUpdates "
+                f"instance): {e}. Backing off 15s and re-checking the "
+                "instance lock — the bot will resume automatically."
+            )
+            import time as _t
+            _t.sleep(15)
+        except KeyboardInterrupt:
+            logger.info("🛑 Polling stopped by operator.")
+            break
+        except Exception as e:
+            # Any other fatal polling error: log, wait, retry instead of
+            # dying — a single transient failure shouldn't take the bot down.
+            logger.exception(f"💥 Polling loop error: {e}. Retrying in 15s.")
+            import time as _t
+            _t.sleep(15)
 
 
 # ── Background jobs ────────────────────────────────────────────────────────────
