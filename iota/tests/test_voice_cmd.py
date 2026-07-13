@@ -79,6 +79,30 @@ class TestVoiceCmdFailure(unittest.TestCase):
         thinking.delete.assert_awaited()
         context.bot.send_voice.assert_awaited()
 
+    def test_owner_configured_speaker_wins_over_lang_default(self):
+        # Regression: /voice used to silently override the owner-configured
+        # default speaker with LANG_DEFAULT_VOICE (e.g. "ratan" for en-IN),
+        # so /ttssettings speaker ritu was ignored. The owner's choice must win.
+        update, thinking = _make_update([])
+        context = MagicMock()
+        context.args = ["hi", "hello world"]  # lang = hi-IN
+        captured = {}
+
+        async def fake_tts(text, lang_code, speaker):
+            captured["speaker"] = speaker
+            return b"WAVEDATA"
+
+        with patch.object(utility, "text_to_speech", new=fake_tts), \
+             patch.object(utility, "get_tts_config", return_value={"speaker": "ritu"}), \
+             patch("utils.tts_engine.is_valid_voice", return_value=False), \
+             patch("utils.tts_engine.get_voice_ids", return_value={"ritu", "shubh", "ratan"}), \
+             patch("utils.tts_engine.voice_display", return_value="Ritu"), \
+             patch("utils.tts_engine.send_tts_voice", new=AsyncMock(return_value=(True, None))):
+            _run(utility.voice_cmd(update, context))
+
+        # Must use the owner's configured speaker, NOT the per-language default.
+        self.assertEqual(captured["speaker"], "ritu")
+
 
 if __name__ == "__main__":
     unittest.main()

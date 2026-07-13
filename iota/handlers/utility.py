@@ -14,7 +14,7 @@ from utils.safe_html import safe_html
 from utils.sarvam import translate
 from utils.tts_engine import (text_to_speech, is_valid_voice,
                              get_tts_config, voice_display, get_last_tts_error,
-                             send_tts_voice)
+                             send_tts_voice, DEFAULT_VOICE)
 from config import OWNER_ID, OWNER_USERNAME
 
 LANG_MAP = {
@@ -83,9 +83,15 @@ async def voice_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not text.strip(): await msg.reply_html("❌ No text!"); return
     lang_code = LANG_MAP.get(lang_key, "en-IN")
     if speaker is None:
-        # Use the owner-configured default unless we have a per-language pick.
+        # The owner-configured default speaker ALWAYS takes precedence. The
+        # per-language sensible picks are only a fallback used when the owner
+        # has NOT set a custom global default (still on the built-in "shubh"),
+        # so a voice chosen via /ttssettings speaker (e.g. Ritu) is actually
+        # used by /voice instead of being silently overridden by the map.
         cfg = get_tts_config()
-        speaker = LANG_DEFAULT_VOICE.get(lang_code, cfg["speaker"])
+        speaker = cfg["speaker"]
+        if speaker == DEFAULT_VOICE and lang_code in LANG_DEFAULT_VOICE:
+            speaker = LANG_DEFAULT_VOICE[lang_code]
     thinking  = await msg.reply_html(f"🎙️ {sc('Generating voice')}...")
     try:
         audio_bytes = await text_to_speech(text[:2500], lang_code, speaker)
