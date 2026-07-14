@@ -280,8 +280,15 @@ def main():
         commandstats_cmd, errorlog_cmd,         sudoadd_cmd, sudoremove_cmd, stafflist_cmd,
         handover_cmd, whereis_cmd, common_cmd, economystats_cmd, toprich_cmd,
         rain_cmd, reseteco_cmd, dbstats_cmd, exportcsv_cmd, backup_cmd, vacuum_cmd,
-        indexes_cmd, persona_cmd, defaultwelcome_cmd, forcewelcome_cmd, botbio_cmd,
+        indexes_cmd,         persona_cmd, defaultwelcome_cmd, forcewelcome_cmd, botbio_cmd,
         setmenu_cmd, logchat_cmd, notify_cmd, alert_cmd, ownersys_cmd,
+    )
+    from handlers.owner_systems import (
+        leavegroup_cmd, leaveallgroups_cmd, groupslist_cmd, groupscount_cmd,
+        chatinfo_cmd, osetrules_cmd, antispam_cmd, cleandb_cmd, userinfo_cmd,
+        exportusers_cmd, getfile_cmd, botinfo_cmd, sysinfo_cmd, logs_cmd,
+        restart_cmd, osetbotname_cmd, setbotdesc_cmd, setbotpic_cmd,
+        setbotcommands_cmd, opurge_cmd,
     )
     from handlers.sticker_reply import (
         sticker_reply_handler, gif_reply_handler,
@@ -757,6 +764,20 @@ def main():
         ("logchat",logchat_cmd),("notify",notify_cmd),("alert",alert_cmd),
         # Master command catalog + /payment DM-only alias
         ("commands",commands_cmd),("payment",pay_cmd),
+    ]:
+        app.add_handler(CommandHandler(c, f))
+
+    # ── Extended owner systems (handlers/owner_systems.py) ──────────────
+    for c, f in [
+        ("leavegroup",leavegroup_cmd),("leaveallgroups",leaveallgroups_cmd),
+        ("groupslist",groupslist_cmd),("groupscount",groupscount_cmd),
+        ("chatinfo",chatinfo_cmd),("osetrules",osetrules_cmd),
+        ("antispam",antispam_cmd),("cleandb",cleandb_cmd),
+        ("userinfo",userinfo_cmd),("exportusers",exportusers_cmd),
+        ("getfile",getfile_cmd),("botinfo",botinfo_cmd),("sysinfo",sysinfo_cmd),
+        ("logs",logs_cmd),("restart",restart_cmd),("osetbotname",osetbotname_cmd),
+        ("setbotdesc",setbotdesc_cmd),("setbotpic",setbotpic_cmd),
+        ("setbotcommands",setbotcommands_cmd),("opurge",opurge_cmd),
     ]:
         app.add_handler(CommandHandler(c, f))
 

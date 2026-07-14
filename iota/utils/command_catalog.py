@@ -484,6 +484,9 @@ CATALOG = {
     "logchat": ["Owner Systems", "Set the log channel."],
     "notify": ["Owner Systems", "Toggle owner notifications."],
     "alert": ["Owner Systems", "Send an owner alert."],
+    "osetrules": ["Owner Systems", "Owner: set a group's rules by chat_id."],
+    "osetbotname": ["Owner Systems", "Owner: set the bot's display name."],
+    "opurge": ["Owner Systems", "Owner: purge N messages in any group."],
 
     # ── Misc ────────────────────────────────────────────────────────
     "start": ["Core", "Start / welcome message."],
