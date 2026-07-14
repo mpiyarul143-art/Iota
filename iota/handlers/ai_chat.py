@@ -550,9 +550,13 @@ async def _respond(uid: int, text: str, is_premium: bool,
 async def ai_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user; msg = update.effective_message
     chat_obj = update.effective_chat
-    await ensure_user(u.id, u.username or "", u.full_name)
-    await update_last_seen(u.id, u.username or "", u.full_name)
-    d = await get_user(u.id)
+    try:
+        await ensure_user(u.id, u.username or "", u.full_name)
+        await update_last_seen(u.id, u.username or "", u.full_name)
+        d = await get_user(u.id)
+    except Exception as e:
+        logger.warning(f"ai_cmd DB ops failed (continuing): {e}")
+        d = {}
 
     if context.args:
         user_text = " ".join(context.args)
@@ -566,16 +570,21 @@ async def ai_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_html("kyu tujhe uski personal details? nahi bataungi 🙄"); return
 
     thinking = await msg.reply_html("💭 soch rahi hoon...")
+    is_premium = bool((d or {}).get("is_premium", False))
     try:
         is_group = chat_obj.type != "private"
-        reply = await _respond(u.id, user_text, d.get("is_premium", False),
+        reply = await _respond(u.id, user_text, is_premium,
                                is_group, chat_obj.title or "",
                                first_name=u.first_name or "", username=u.username or "")
         await _safe_edit(thinking, reply)
         await _maybe_send_reply_gif(msg, reply)
     except Exception as e:
+        # 🔴 FINAL SAFETY NET: never leave the user staring at "soch rahi hoon…"
         logger.warning(f"ai_cmd failed: {e}")
-        await _safe_edit(thinking, "system pagal ho gaya 🙄 baad mein try karo")
+        try:
+            await _safe_edit(thinking, "arre system thoda gussa hai 😤 baad mein try karo?")
+        except Exception:
+            pass
 
 
 # ── DM auto-reply ─────────────────────────────────────────────────────────────
@@ -630,9 +639,16 @@ async def dm_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if u.id in _valentine_state: return
     except Exception as e:
         logger.debug(f"valentine state check failed: {e}")
-    await ensure_user(u.id, u.username or "", u.full_name)
-    await update_last_seen(u.id, u.username or "", u.full_name)
-    d = await get_user(u.id)
+    # DB writes/reads must NEVER crash the reply path. If Mongo is having
+    # a moment, fall back to a minimal user dict and still answer.
+    try:
+        await ensure_user(u.id, u.username or "", u.full_name)
+        await update_last_seen(u.id, u.username or "", u.full_name)
+        d = await get_user(u.id)
+    except Exception as e:
+        logger.warning(f"dm_message_handler DB ops failed (continuing): {e}")
+        d = {}
+    is_premium = bool(d.get("is_premium", False)) if isinstance(d, dict) else False
 
     # ── Spam block check (15-min mute from flood detection) ──────────────────
     try:
@@ -642,7 +658,7 @@ async def dm_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if until and _time_check.time() < until:
             remaining = int((until - _time_check.time()) / 60) + 1
             await msg.reply_html(
-                f"⛔ Yᴏᴜ ʜᴀᴠᴇ ʙᴇᴇɴ ʙʟᴏᴄᴋᴇᴅ ꜰʀᴏᴍ ᴜsɪɴɢ Iᴏᴛᴀ ꜰᴏʀ "
+                f"⛔ Yᴏᴜ ʜᴀᴠᴇ ʙʟᴏᴄᴋᴇᴅ ꜰʀᴏᴍ ᴜsɪɴɢ Iᴏᴛᴀ ꜰᴏʀ "
                 f"{remaining} ᴍɪɴᴜᴛᴇ(s) ᴅᴜᴇ ᴛᴏ sᴘᴀᴍᴍɪɴɢ. Pʟᴇᴀsᴇ sʟᴏᴡ ᴅᴏᴡɴ."
             )
             return
@@ -653,12 +669,18 @@ async def dm_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if _is_asking_about_other(text):
         await msg.reply_html("kyu tujhe uski personal details? nahi bataungi 🙄"); return
     try:
-        reply = await _respond(u.id, text, d.get("is_premium", False), False, "", 130,
+        reply = await _respond(u.id, text, is_premium, False, "", 130,
                                first_name=u.first_name or "", username=u.username or "")
         await _safe_send(msg, reply)
         await _maybe_send_reply_gif(msg, reply)
     except Exception as e:
+        # 🔴 FINAL SAFETY NET: no matter what blew up, the user must still
+        # see a message from Iota — never silent nothing.
         logger.warning(f"dm_message_handler failed: {e}")
+        try:
+            await _safe_send(msg, "arre system thoda gussa hai 😤 thodi der baad try karo?")
+        except Exception:
+            pass
 
 
 # ── Smart group-reply detection ───────────────────────────────────────────────
@@ -719,27 +741,29 @@ async def group_mention_handler(update: Update, context: ContextTypes.DEFAULT_TY
     if not clean:
         await msg.reply_html("kuch poocha? bol na cutie 🥺"); return
 
-    await ensure_user(u.id, u.username or "", u.full_name)
-    await update_last_seen(u.id, u.username or "", u.full_name)
-    d = await get_user(u.id)
+    try:
+        await ensure_user(u.id, u.username or "", u.full_name)
+        await update_last_seen(u.id, u.username or "", u.full_name)
+        d = await get_user(u.id)
+    except Exception as e:
+        logger.warning(f"group_mention_handler DB ops failed (continuing): {e}")
+        d = {}
+    is_premium = bool((d or {}).get("is_premium", False))
 
     if _is_asking_about_other(clean):
         await msg.reply_html("kyu tujhe uski personal details? group me sirf public info share hoti 🙄"); return
 
     try:
-        reply = await _respond(u.id, clean, d.get("is_premium", False),
+        reply = await _respond(u.id, clean, is_premium,
                                True, update.effective_chat.title or "", 130,
                                first_name=u.first_name or "", username=u.username or "")
         await _safe_send(msg, reply)
         await _maybe_send_reply_gif(msg, reply)
     except Exception as e:
         logger.warning(f"group_mention_handler AI failed: {e}")
-        # Don't reply to `msg` here — if the source message can't be replied
-        # to (already deleted, service message, etc.) this would itself crash
-        # with "Message to be replied not found". Send to the chat instead.
+        # 🔴 FINAL SAFETY NET: never leave the group with total silence.
         try:
-            await context.bot.send_message(
-                msg.chat_id, "system pagal ho gaya 🙄", parse_mode="HTML")
+            await _safe_send(msg, "arre system thoda gussa hai 😤 baad mein try karo?")
         except Exception:
             pass
 
