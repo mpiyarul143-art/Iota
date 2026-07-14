@@ -150,7 +150,6 @@ async def werewolf_end_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_html(
         f"🐺 <b>Game ended early by {mention(u)}.</b>\n\n"
         f"🎭 Roles were:\n{reveal}",
-        parse_mode="HTML"
     )
 
 
@@ -168,7 +167,7 @@ async def werewolf_join_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await ensure_user(u.id, u.username or "", u.full_name)
     lobby["players"].append({"id": u.id, "name": safe_html(u.first_name)})
     await update.message.reply_html(
-        f"🐺 {mention(u)} joined! ({len(lobby['players'])}/{MAX_PLAYERS})", parse_mode="HTML"
+        f"🐺 {mention(u)} joined! ({len(lobby['players'])}/{MAX_PLAYERS})"
     )
 
 
@@ -529,7 +528,7 @@ async def vote_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_html("❌ Invalid choice."); return
 
     game["votes"][u.id] = target["id"]
-    await update.message.reply_html(f"🗳️ {mention(u)} voted to eliminate <b>{target['name']}</b>!", parse_mode="HTML")
+    await update.message.reply_html(f"🗳️ {mention(u)} voted to eliminate <b>{target['name']}</b>!")
 
 
 async def _day_timer(context, chat_id):

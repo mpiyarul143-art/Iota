@@ -134,7 +134,7 @@ async def avatar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         photos = await context.bot.get_user_profile_photos(target.id, limit=1)
         if not photos or photos.total_count == 0:
-            await msg.reply_html(f"🖼️ {mention(target)} {sc('has no profile photo set.')}", parse_mode="HTML")
+            await msg.reply_html(f"🖼️ {mention(target)} {sc('has no profile photo set.')}")
             return
         file_id = photos.photos[0][-1].file_id
         await msg.reply_photo(file_id, caption=f"🖼️ {sc('Profile photo of')} {mention(target)}", parse_mode="HTML")

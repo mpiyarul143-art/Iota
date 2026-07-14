@@ -139,6 +139,15 @@ class TestWhisperCommand(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Tᴀʀɢᴇᴛ", out)  # target mention (small-caps styled)
         self.assertTrue(msg.reply_html.call_args.kwargs.get("reply_markup") is not None)
 
+    # ── 4b. reply_html must NOT pass parse_mode (deployed PTB rejects it) ─
+    async def test_whisper_reply_html_has_no_parse_mode(self):
+        ctx = _ctx()
+        msg = await self._call("/whisper hey there", ctx, reply_user=42)
+        # The deployed python-telegram-bot build raises TypeError if
+        # reply_html() is given a parse_mode kwarg (it is implied HTML).
+        kwargs = msg.reply_html.call_args.kwargs
+        self.assertNotIn("parse_mode", kwargs)
+
     # ── 5. named @username resolves and creates the whisper ──────────────
     async def test_whisper_named_user_creates(self):
         resolved = _user(321, "Named", username="named")

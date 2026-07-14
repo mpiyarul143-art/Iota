@@ -602,7 +602,14 @@ async def group_mention_handler(update: Update, context: ContextTypes.DEFAULT_TY
         await _maybe_send_reply_gif(msg, reply)
     except Exception as e:
         logger.warning(f"group_mention_handler AI failed: {e}")
-        await msg.reply_html("system pagal ho gaya 🙄")
+        # Don't reply to `msg` here — if the source message can't be replied
+        # to (already deleted, service message, etc.) this would itself crash
+        # with "Message to be replied not found". Send to the chat instead.
+        try:
+            await context.bot.send_message(
+                msg.chat_id, "system pagal ho gaya 🙄", parse_mode="HTML")
+        except Exception:
+            pass
 
 
 async def clear_my_memory_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):

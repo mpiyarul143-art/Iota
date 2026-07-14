@@ -100,7 +100,7 @@ async def whisper_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]])
     await msg.reply_html(
         sc_all(f"💬 {mention(u)} whispered to {target_mention} 🤫"),
-        parse_mode="HTML", reply_markup=kb,
+        reply_markup=kb,
     )
 
 
