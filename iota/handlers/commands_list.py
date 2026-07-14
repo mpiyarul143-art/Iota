@@ -68,10 +68,13 @@ async def commands_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def _send_category(update, cat: str):
+    msg = _resolve_message(update)
+    if msg is None:
+        return
     cats = all_categories()
     cmds = cats.get(cat, [])
     if not cmds:
-        await update.effective_message.reply_html(f"📂 {safe_html(cat)} — koi command nahi.")
+        await msg.reply_html(f"📂 {safe_html(cat)} — koi command nahi.")
         return
     header = f"📂 <b>{safe_html(cat)}</b> — {len(cmds)} commands\n\n"
     lines = []
@@ -83,7 +86,7 @@ async def _send_category(update, cat: str):
     for ch in chunks:
         body = (header if first else "") + "\n".join(ch)
         first = False
-        await update.effective_message.reply_html(body)
+        await msg.reply_html(body)
 
 
 def _resolve_message(target):

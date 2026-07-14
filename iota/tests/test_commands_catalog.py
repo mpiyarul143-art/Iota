@@ -115,6 +115,24 @@ class TestCommandsCmd(unittest.TestCase):
         _run(m._send_full_file(q))
         self.assertTrue(msg.reply_document.called)
 
+    def test_category_callback_uses_message_not_effective_message(self):
+        # Regression: the crash was commands_callback -> _send_category calling
+        # update.effective_message on a CallbackQuery (which has no such attr).
+        import handlers.commands_list as m
+        q = AsyncMock()
+        q.answer = AsyncMock()
+        q.data = "cmds_cat_fun"  # simulate clicking the Fun category
+        q.effective_message = None  # a real CallbackQuery has no effective_message
+        msg = AsyncMock()
+        msg.reply_html = AsyncMock()
+        q.message = msg
+        upd = AsyncMock()
+        upd.callback_query = q
+        ctx = AsyncMock()
+        _run(m.commands_callback(upd, ctx))
+        self.assertTrue(q.answer.called)
+        self.assertTrue(msg.reply_html.called)
+
 
 if __name__ == "__main__":
     unittest.main()
