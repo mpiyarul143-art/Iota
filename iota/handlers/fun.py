@@ -755,7 +755,7 @@ async def valentine_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await ensure_user(u.id, u.username or "", u.full_name)
     if await get_valentine(u.id):
         await update.message.reply_html("💌 Already registered!\nUse /valentine_delete to re-register."); return
-    _valentine_state[u.id] = {"step": "gender"}
+    _valentine_state[u.id] = {"step": "gender", "ts": time.time()}
     await update.message.reply_html(
         "💌 <b>Valentine Event!</b>\n\nStep 1/4: What is your gender?\n"
         "Reply: <code>male</code> or <code>female</code>"
@@ -782,31 +782,58 @@ async def valentine_delete_cmd(update: Update, context: ContextTypes.DEFAULT_TYP
     await update.message.reply_html("✅ Deleted! Use /valentine to re-register.")
 
 
+# A form is only "active" for this long. After it expires the user is
+# auto-released back to normal DM chat — this is the safety net that stops
+# the valentine flow from permanently swallowing a user's DMs (which made
+# Iota look like it "stopped replying in DM" for anyone who started the
+# form and then got stuck on it).
+_VALENTINE_TTL = 900  # seconds (15 minutes)
+
+
 async def valentine_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u    = update.effective_user
-    text = (update.message.text or "").strip()
+    msg  = update.effective_message
+    text = (msg.text or "").strip()
     st   = _valentine_state.get(u.id)
     if not st: return
+    # 🔴 Auto-expire stale forms so a user can never be trapped forever.
+    if (time.time() - st.get("ts", 0)) > _VALENTINE_TTL:
+        _valentine_state.pop(u.id, None)
+        return
     step = st.get("step")
     if step == "gender":
         if text.lower() not in ("male", "female"):
-            await update.message.reply_html("❌ Reply <code>male</code> or <code>female</code>"); return
-        st["gender"] = text.lower(); st["step"] = "choice1"
-        await update.message.reply_html(
+            # 🔴 FIX: don't trap the user inside the form. Cancel it so they
+            # can go back to chatting with Iota instead of being stuck on
+            # "Reply male or female" forever (which also blocks the DM AI).
+            _valentine_state.pop(u.id, None)
+            await msg.reply_html(
+                "❌ Valentine form cancelled — type <code>/valentine</code> "
+                "to register anytime 💕")
+            return
+        st["gender"] = text.lower(); st["step"] = "choice1"; st["ts"] = time.time()
+        await msg.reply_html(
             "💌 Step 2/4: Enter <b>User ID</b> of your 1st choice\n"
             "Use /id to get ID. Or type <code>skip</code>"
         )
     elif step == "choice1":
-        st["choice1"] = int(text) if text.isdigit() else 0; st["step"] = "choice2"
-        await update.message.reply_html("💌 Step 3/4: 2nd choice User ID (or <code>skip</code>)")
+        st["choice1"] = int(text) if (text.isdigit() or text.lower() == "skip") else 0
+        st["step"] = "choice2"; st["ts"] = time.time()
+        await msg.reply_html("💌 Step 3/4: 2nd choice User ID (or <code>skip</code>)")
     elif step == "choice2":
-        st["choice2"] = int(text) if text.isdigit() else 0; st["step"] = "choice3"
-        await update.message.reply_html("💌 Step 4/4: 3rd choice User ID (or <code>skip</code>)")
+        st["choice2"] = int(text) if (text.isdigit() or text.lower() == "skip") else 0
+        st["step"] = "choice3"; st["ts"] = time.time()
+        await msg.reply_html("💌 Step 4/4: 3rd choice User ID (or <code>skip</code>)")
     elif step == "choice3":
+        # 🔴 FIX: ALWAYS clear the form at the end, whether the input is a
+        # valid ID, "skip", or anything else. Previously a non-digit final
+        # input left the user stuck at this step forever → every later DM
+        # was eaten by the form instead of reaching the AI chat.
+        # "skip" (and any non-numeric text) simply records 0.
         c3 = int(text) if text.isdigit() else 0
         _valentine_state.pop(u.id, None)
         await set_valentine(u.id, st["gender"], st.get("choice1", 0), st.get("choice2", 0), c3)
-        await update.message.reply_html(
+        await msg.reply_html(
             f"✅ <b>Valentine registered!</b>\n\nGender: {st['gender']}\n"
             f"Choices: {st.get('choice1',0)} | {st.get('choice2',0)} | {c3}\n\n"
             f"Results declared soon! 💌"

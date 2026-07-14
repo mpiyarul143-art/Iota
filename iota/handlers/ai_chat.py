@@ -651,7 +651,16 @@ async def dm_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
     try:
         from handlers.fun import _valentine_state
-        if u.id in _valentine_state: return
+        _vst = _valentine_state.get(u.id)
+        if _vst is not None:
+            import time as _vt
+            # 🔴 NEVER let a stuck/expired valentine form block the AI chat.
+            # If the form is older than 15 min (or has no timestamp), clear
+            # it and reply normally instead of silently eating the DM.
+            if (_vt.time() - _vst.get("ts", 0)) > 900:
+                _valentine_state.pop(u.id, None)
+            else:
+                return
     except Exception as e:
         logger.debug(f"valentine state check failed: {e}")
     # DB writes/reads must NEVER crash the reply path. If Mongo is having
@@ -683,9 +692,15 @@ async def dm_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         pass
     if _is_asking_about_other(text):
         await msg.reply_html("kyu tujhe uski personal details? nahi bataungi 🙄"); return
+    # 🔴 Show a "typing…" indicator immediately so the DM never looks dead
+    # while Iota is fetching real-time search results + calling the AI.
+    try:
+        await context.bot.send_chat_action(chat_id=msg.chat_id, action="typing")
+    except Exception:
+        pass
     try:
         reply = await _respond(u.id, text, is_premium, False, "", 130,
-                               first_name=u.first_name or "", username=u.username or "")
+                                first_name=u.first_name or "", username=u.username or "")
         await _safe_send(msg, reply)
         await _maybe_send_reply_gif(msg, reply)
     except Exception as e:
