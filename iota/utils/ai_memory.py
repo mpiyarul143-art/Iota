@@ -30,23 +30,45 @@ def _pair_key(a: int, b: int) -> str:
 
 async def get_memory(uid: int, limit=12, shared_with: int = None) -> list:
     """
-    Get recent messages for this user. If `shared_with` is given (an
-    active connection partner), this returns the SHARED conversation
-    history for the pair (both users' messages, in order) instead of
-    just this user's own — so Iota's replies stay consistent for either
-    of them while they're connected.
+    Get recent messages for this user.
+
+    If `shared_with` is given (an active connection partner), this returns
+    the MERGED history Iota should see while the two are connected:
+      • the SHARED pair conversation (both users' messages tagged with this
+        pair's key) — this is what makes Iota answer consistently for either
+        person, and lets each see what the other told her, and
+      • THIS user's OWN private memory (messages with no pair key) — so
+        connecting never wipes what Iota already knew about the person.
+    Messages belonging to a DIFFERENT pair are excluded (they're not this
+    user's, and not shared with this partner).
+
+    If `shared_with` is None, this returns just this user's own history.
     """
     db = get_db()
     now = int(time.time())
     cutoff = now - (MEMORY_TTL_DAYS * 86400)
-    await db.ai_memory.delete_many({"uid": uid, "ts": {"$lt": cutoff}})
+    # Only purge THIS user's PRIVATE (non-shared) memories here. Shared
+    # (pair_key) memories are co-owned by the partner and are cleaned by the
+    # global cleanup_old_memories() job instead — otherwise one partner's
+    # cleanup would silently delete messages the other still needs.
+    await db.ai_memory.delete_many(
+        {"uid": uid, "pair_key": {"$exists": False}, "ts": {"$lt": cutoff}}
+    )
 
     if shared_with is not None:
         pk = _pair_key(uid, shared_with)
-        docs = await db.ai_memory.find(
-            {"pair_key": pk}, sort=[("ts", -1)], limit=limit
-        ).to_list(limit)
-        docs.reverse()
+        # Fetch a generous window of each side, then merge + keep the most
+        # recent `limit` so both the shared and private context fit.
+        shared = await db.ai_memory.find(
+            {"pair_key": pk}, sort=[("ts", 1)], limit=limit * 4
+        ).to_list(limit * 4)
+        private = await db.ai_memory.find(
+            {"uid": uid, "pair_key": {"$exists": False}},
+            sort=[("ts", 1)], limit=limit * 4,
+        ).to_list(limit * 4)
+        docs = list(shared) + list(private)
+        docs.sort(key=lambda d: d["ts"])
+        docs = docs[-limit:]
         return [{"role": d["role"], "content": d["content"]} for d in docs]
 
     docs = await db.ai_memory.find(
