@@ -804,7 +804,7 @@ def main():
     ), group=2)
     app.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND, autoreply_handler
-    ), group=2)
+    ), group=3)
 
     # ── Command-usage analytics (feeds /commandstats) ───────────────────
     # Runs alongside the real command handlers; just counts invocations.
@@ -1030,11 +1030,15 @@ def main():
         try:
             from utils.mongo_db import get_db
             db = get_db()
-            # Create the TTL index once (auto-expires rows after 1h so the
-            # collection never grows unbounded). Best-effort.
+            # Create the TTL index once (auto-expires rows after 90s so the
+            # collection stays tiny). Best-effort. 🔴 Kept SHORT on purpose:
+            # a long TTL made the dedup suppress any update re-fetched after a
+            # restart (Telegram re-delivers recent updates when offset isn't
+            # flushed in time), which silently dropped DMs. 90s only catches
+            # genuine rapid duplicate deliveries, never a legit re-fetch.
             if not getattr(_dedup_update, "_indexed", False):
                 try:
-                    await db.update_dedup.create_index("t", expireAfterSeconds=3600)
+                    await db.update_dedup.create_index("t", expireAfterSeconds=90)
                     _dedup_update._indexed = True
                 except Exception:
                     logger.debug("dedup TTL index create failed", exc_info=True)
@@ -1105,74 +1109,74 @@ def main():
     app.add_handler(MessageHandler(
         filters.TEXT & filters.ChatType.GROUPS & ~filters.COMMAND,
         flood_check_handler
-    ), group=2)
+    ), group=4)
 
     # 3. Protection (spam/link)
     app.add_handler(MessageHandler(
         filters.TEXT & filters.ChatType.GROUPS & ~filters.COMMAND,
         protection_handler
-    ), group=3)
+    ), group=5)
 
     # 4. Welcome back after dead
     app.add_handler(MessageHandler(
         filters.TEXT & filters.ChatType.GROUPS & ~filters.COMMAND,
         welcome_back_handler
-    ), group=4)
+    ), group=6)
 
     # 4b. 🆕 Admin filters (keyword auto-responders) — fire before the
     # AI mention handler so a filter reply isn't delayed by AI chatter.
     app.add_handler(MessageHandler(
         filters.TEXT & filters.ChatType.GROUPS & ~filters.COMMAND,
         filter_enforcement_handler
-    ), group=4)
+    ), group=7)
 
     # 5b. AI Truth/Dare reply handler (reacts when user replies to a T/D prompt)
     app.add_handler(MessageHandler(
         filters.TEXT & filters.ChatType.GROUPS & ~filters.COMMAND,
         truth_dare_reply_handler
-    ), group=5)
+    ), group=8)
 
     # 6. @mention / tag / direct-address AI in groups
     app.add_handler(MessageHandler(
         filters.TEXT & filters.ChatType.GROUPS & ~filters.COMMAND,
         group_mention_handler
-    ), group=6)
+    ), group=9)
 
     # 6b. AFK check handler
     app.add_handler(MessageHandler(
         filters.TEXT & filters.ChatType.GROUPS & ~filters.COMMAND,
         afk_check_handler
-    ), group=7)
+    ), group=10)
 
     # 7. Note getter (#notename)
     app.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND,
         get_note_handler
-    ), group=8)
+    ), group=11)
 
     # 8. Hangman letter
     app.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND,
         hangman_handler
-    ), group=9)
+    ), group=12)
 
     # 9. Word game letter
     app.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND,
         wordgame_letter_handler
-    ), group=10)
+    ), group=13)
 
     # 9b. 🆕 Chess move (reply with algebraic notation, e.g. e2e4)
     app.add_handler(MessageHandler(
         filters.TEXT & filters.ChatType.GROUPS & ~filters.COMMAND,
         chess_move_handler
-    ), group=18)
+    ), group=21)
 
     # 10. Valentine form (DM)
     app.add_handler(MessageHandler(
         filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND,
         valentine_message_handler
-    ), group=11)
+    ), group=14)
 
     # 11. Whisper private compose (captures the secret the sender types in DM,
     #       registered just before the AI auto-reply so it can pre-empt it
@@ -1180,38 +1184,43 @@ def main():
     app.add_handler(MessageHandler(
         filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND,
         whisper_dm_handler
-    ), group=12)
+    ), group=15)
 
-    # 11. DM AI auto-reply (lowest priority)
+    # 11. 🔴 DM AI auto-reply.
+    # CRITICAL: python-telegram-bot runs AT MOST ONE handler per group
+    # (process_update `break`s after the first matching handler). This
+    # handler MUST be in its OWN group, otherwise the whisper_dm_handler
+    # registered just above (same filter, group 12) wins and this AI reply
+    # handler NEVER runs — which is exactly why Iota went silent in DMs.
     app.add_handler(MessageHandler(
         filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND,
         dm_message_handler
-    ), group=12)
+    ), group=16)
 
     # ── 📦 Media handlers (sticker/GIF/photo/emoji) ────────────────────
     # Sticker reply — works in DMs always; in groups only when bot is addressed
     app.add_handler(MessageHandler(
         filters.Sticker.ALL,
         sticker_reply_handler
-    ), group=14)
+    ), group=17)
 
     # GIF/animation reply — same rules as sticker
     app.add_handler(MessageHandler(
         filters.ANIMATION,
         gif_reply_handler
-    ), group=15)
+    ), group=18)
 
     # Photo reaction — triggered in DMs or when bot is @tagged/replied-to
     app.add_handler(MessageHandler(
         filters.PHOTO,
         photo_reaction_handler
-    ), group=16)
+    ), group=19)
 
     # Emoji-only messages in DMs
     app.add_handler(MessageHandler(
         filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND,
         emoji_only_handler
-    ), group=17)
+    ), group=20)
 
     # ── Global error handler — prevents silent command failures ───────
     from utils.error_handler import global_error_handler
@@ -1345,6 +1354,14 @@ def main():
 
     async def _guarded_process_update(update):
         try:
+            chat = update.effective_chat
+            # 🔴 DMs are ALWAYS answered. Never drop a private message for
+            # being "stale" — the bot may have been spun down / restarted and
+            # the user's DM was simply queued. Only GROUP chats keep the
+            # staleness guard (its real purpose: don't react to an old admin
+            # command like a stale .promote from hours ago).
+            if chat is not None and chat.type == "private":
+                return await _orig_process_update(update)
             msg = update.effective_message
             if msg is not None and msg.date is not None:
                 # msg.date is timezone-aware UTC; compare against now UTC.
@@ -1403,7 +1420,14 @@ def main():
         TerminatedByOtherGetUpdates = Conflict
     while True:
         try:
-            app.run_polling(drop_pending_updates=True)
+            # 🔴 Do NOT drop pending updates. On Render's free tier the bot
+            # spins down after inactivity; any DM sent while it was down is
+            # queued by Telegram and must still be answered on wake-up.
+            # `drop_pending_updates=True` was silently discarding those DMs
+            # (and every DM re-fetched after a restart), which looked exactly
+            # like "Iota doesn't reply in DM". Private chats are also exempt
+            # from the staleness guard below, so a queued DM is always handled.
+            app.run_polling()
             break  # clean shutdown
         except (Conflict, TerminatedByOtherGetUpdates) as e:
             logger.warning(
