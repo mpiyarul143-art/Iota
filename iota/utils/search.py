@@ -15,9 +15,11 @@ error) is swallowed and the next source is tried. The AI only ever sees a
 clean `search_summary()` string or "" — never a raw exception — so the
 chat path stays at 0 errors.
 """
+import asyncio
 import logging
 import aiohttp
 import re
+import time as _time
 import urllib.parse
 from html import unescape
 
@@ -194,28 +196,225 @@ def _safe_json(txt: str):
         return {}
 
 
+# ── Result caching (in-memory, short TTL) ─────────────────────────────────
+# DuckDuckGo rate-limits datacenter IPs, so the SAME query can return results
+# one moment and nothing the next. Caching makes repeated/identical queries
+# return consistent, reliable answers and avoids re-hitting the flaky
+# provider on every single message (which is exactly why "Elon Musk net
+# worth" gave data once, then "can't check", then a wrong training answer).
+_CACHE: dict = {}
+_CACHE_TTL = 900  # 15 minutes
+
+
+def _cache_key(q: str) -> str:
+    return re.sub(r"\s+", " ", q.strip().lower())[:120]
+
+
+def _cache_get(q: str):
+    k = _cache_key(q)
+    hit = _CACHE.get(k)
+    if hit and (_time.time() - hit[1]) < _CACHE_TTL:
+        return hit[0]
+    _CACHE.pop(k, None)
+    return None
+
+
+def _cache_set(q: str, results: list):
+    _CACHE[_cache_key(q)] = (results, _time.time())
+
+
+def _is_wikipedia(url: str) -> bool:
+    return bool(url) and "wikipedia.org" in url
+
+
+# Romanized-Hindi function words that carry no searchable meaning for an
+# English encyclopedia. Stripping them lets the Wikipedia fallback find the
+# real entity in mixed queries like "Elon Musk ki networth kitni hain".
+_ROMANIZED_HI = {
+    "ki", "ka", "ke", "ko", "kya", "kyu", "kyun", "kon", "kaun", "kaise",
+    "kahan", "kab", "kitna", "kitni", "kitne", "hai", "hain", "ho", "hoon",
+    "main", "mein", "me", "se", "aur", "par", "to", "tu", "tum", "aap",
+    "apna", "uska", "unki", "mera", "teri", "kuch", "bhi", "ab", "tak",
+    "the", "thi", "tho", "ya", "yaar", "cutie", "de", "do", "is", "are",
+    "was", "were", "kaisa", "aisa", "vaisa", "bahut", "thoda", "bohot",
+}
+
+# Quantity / attribute nouns that pollute a Wikipedia article search (e.g.
+# "Elon Musk networth" matches "Zip2" badly, but "Elon Musk" matches the
+# right article). Dropped only for the Wikipedia fallback search.
+_WIKI_NOISE = {
+    "networth", "net", "worth", "income", "price", "cost", "rate", "rates",
+    "total", "current", "latest", "news", "update", "updates", "released",
+    "release", "trailer", "today", "tonight", "tomorrow", "now", "live",
+    "real", "time", "kimat", "kitni", "kitna", "kitne", "hain", "hai",
+}
+
+
+def _clean_query_for_wiki(query: str) -> str:
+    """Drop romanized-Hindi / quantity filler so Wikipedia search sees the
+    actual entity (e.g. 'Elon Musk ki networth kitni hain' -> 'Elon Musk').
+    Falls back to the original query if nothing usable remains."""
+    toks = re.findall(r"[A-Za-z][A-Za-z0-9.'-]*", query)
+    kept = [t for t in toks
+            if t.lower() not in _ROMANIZED_HI
+            and t.lower() not in _WIKI_NOISE and len(t) > 1]
+    cleaned = " ".join(kept).strip()
+    return cleaned or query.strip()
+
+
+def _query_entities(query: str) -> set:
+    """Significant Latin tokens of the original query, used to reject
+    irrelevant Wikipedia hits (so we never prepend a wrong article)."""
+    toks = re.findall(r"[A-Za-z][A-Za-z0-9.'-]*", query)
+    return {t.lower() for t in toks
+            if t.lower() not in _ROMANIZED_HI
+            and t.lower() not in _WIKI_NOISE and len(t) >= 4}
+
+
+async def _wiki_extract(title: str, max_len: int = 420) -> str:
+    """Fetch the lead extract of a Wikipedia article via the REST summary
+    API. This is EXTREMELY reliable from datacenter IPs (it's what the
+    Wikipedia apps use) and returns the actual factual prose — usually
+    including the exact figure the user asked for (e.g. a net-worth number),
+    not just a truncated teaser. Returns '' on any failure."""
+    api = ("https://en.wikipedia.org/api/rest_v1/page/summary/"
+           + urllib.parse.quote(title.replace(" ", "_")))
+    try:
+        async with aiohttp.ClientSession() as s:
+            txt = await _fetch(
+                s, "GET", api,
+                headers={"User-Agent": "IotaBot/1.0 (https://t.me/Its_iotabot)"}
+            )
+        if not txt:
+            return ""
+        data = _safe_json(txt)
+        ex = (data.get("extract") or "").strip()
+        return ex[:max_len] if ex else ""
+    except Exception as e:
+        logger.debug(f"_wiki_extract failed for {title!r}: {e}")
+        return ""
+
+
+async def _enrich_with_wikipedia(results: list, max_results: int) -> list:
+    """Replace shallow search snippets of Wikipedia hits with their real
+    lead extract, so the AI gets grounded facts instead of a clipped teaser.
+    Non-Wikipedia results are kept as-is. Bounded: at most 3 extract fetches,
+    run concurrently to cap latency."""
+    wiki_idx = [i for i, r in enumerate(results) if _is_wikipedia(r.get("url", ""))]
+    if not wiki_idx:
+        return results
+    titles = []
+    for i in wiki_idx[:3]:
+        u = results[i].get("url", "")
+        m = re.search(r"/wiki/([^?#]+)", u)
+        titles.append(urllib.parse.unquote(m.group(1)) if m else "")
+    extracts = await asyncio.gather(*(_wiki_extract(t) for t in titles))
+    for idx, ex in zip(wiki_idx[:3], extracts):
+        if ex:
+            results[idx]["snippet"] = ex
+    return results
+
+
+async def _wikipedia_full(query: str, max_results: int) -> list:
+    """Reliable fall-back used when DuckDuckGo returns nothing: Wikipedia
+    search + lead extracts. Keeps factual queries answerable even when DDG
+    is blocking the datacenter IP. The query is cleaned of romanized-Hindi
+    filler first so mixed queries ('Elon Musk ki networth kitni hain')
+    resolve to the right article."""
+    clean = _clean_query_for_wiki(query)
+    try:
+        hits = await _wikipedia(clean, max_results)
+    except Exception:
+        hits = []
+    if not hits:
+        return []
+    titles = [h["title"] for h in hits[:max_results]]
+    extracts = await asyncio.gather(*(_wiki_extract(t) for t in titles))
+    out = []
+    for h, ex in zip(hits[:max_results], extracts):
+        if ex:
+            out.append({"title": h["title"], "url": h["url"], "snippet": ex})
+        if len(out) >= max_results:
+            break
+    return out
+
+
 async def web_search(query: str, max_results: int = 5) -> list:
     """
-    Free web search. Returns list of dicts:
+    Free, RESILIENT web search. Returns list of dicts:
         [{"title", "url", "snippet"}, ...]
-    Tries DuckDuckGo HTML → Lite → Wikipedia, returning the first source
-    that yields results. Always returns a (possibly empty) list — never
-    raises — so callers stay at 0 errors.
+    Strategy (ordered, each step never raises):
+      1. Cache hit → return immediately (consistent + avoids rate limits).
+      2. DuckDuckGo HTML → Lite (tolerant parsers) for broad web coverage.
+      3. Enrich any Wikipedia hits with their REAL lead extract so the AI
+         sees grounded facts, not a clipped teaser.
+      4. If DDG gave nothing, fall back to Wikipedia search + extracts
+         (very reliable from datacenter IPs).
+    Always returns a (possibly empty) list — never raises — so callers stay
+    at 0 errors.
     """
     if not query or not query.strip():
         return []
     query = query.strip()
-    for provider in (_ddg_html, _ddg_lite, _wikipedia):
+
+    cached = _cache_get(query)
+    if cached is not None:
+        logger.debug(f"🔎 search('{query}') -> cache hit ({len(cached)} results)")
+        return cached
+
+    # 1. DuckDuckGo HTML → Lite
+    results = []
+    for provider in (_ddg_html, _ddg_lite):
         try:
             results = await provider(query, max_results)
-            if results:
-                logger.debug(
-                    f"🔎 search('{query}') -> {len(results)} results "
-                    f"via {provider.__name__}"
-                )
-                return results
         except Exception as e:
             logger.debug(f"search provider {provider.__name__} failed: {e}")
+            results = []
+        if results:
+            break
+
+    # 2. Enrich Wikipedia hits with real article extracts (failure-safe:
+    #    if enrichment ever errors, the original DDG results are kept so a
+    #    transient Wikipedia hiccup can never blank out the whole search).
+    if results:
+        try:
+            results = await _enrich_with_wikipedia(results, max_results)
+        except Exception as e:
+            logger.debug(f"wiki enrich failed (keeping DDG results): {e}")
+        # If DDG returned only non-Wikipedia results (e.g. a Hindi news
+        # snippet for "Elon Musk ki networth kitni hain"), still fetch the
+        # canonical Wikipedia extract for the cleaned entity and PREPEND it,
+        # so the AI always has a grounded factual anchor (the real number)
+        # rather than just a teaser.
+        if not any(_is_wikipedia(r.get("url", "")) for r in results):
+            try:
+                wiki = await _wikipedia_full(query, max_results)
+                # 🔴 Relevance guard: only prepend Wikipedia hits whose title
+                # actually contains an entity from the user's query. This
+                # stops a bad Wikipedia search (e.g. "Elon Musk networth"
+                # -> "Zip2") from injecting a WRONG fact into the AI context.
+                ents = _query_entities(query)
+                if wiki and ents:
+                    wiki = [w for w in wiki
+                            if ents & {t.lower() for t in re.findall(r"[A-Za-z]+", w["title"])}]
+                if wiki:
+                    results = wiki + results
+            except Exception as e:
+                logger.debug(f"wiki prepend failed: {e}")
+        _cache_set(query, results)
+        logger.debug(f"🔎 search('{query}') -> {len(results)} results (DDG+wiki)")
+        return results
+
+    # 3. Wikipedia-only fallback (reliable from datacenter IPs)
+    try:
+        wiki = await _wikipedia_full(query, max_results)
+        if wiki:
+            _cache_set(query, wiki)
+            logger.debug(f"🔎 search('{query}') -> {len(wiki)} results (wikipedia)")
+            return wiki
+    except Exception as e:
+        logger.debug(f"wikipedia fallback failed: {e}")
+
     logger.debug(f"🔎 search('{query}') -> no results from any provider")
     return []
 
@@ -232,7 +431,7 @@ async def search_summary(query: str, max_results: int = 4) -> str:
         return ""
     lines = [f"🔍 Real-time info for '{query}':"]
     for i, r in enumerate(results, 1):
-        snip = (r.get("snippet") or "")[:240]
+        snip = (r.get("snippet") or "")[:400]
         lines.append(f"{i}. {r.get('title', '')} — {snip}")
     return "\n".join(lines)
 

@@ -458,6 +458,10 @@ def _should_attempt_search(text: str) -> bool:
         r'\b(movie|film|song|album|game|games|anime|series|web series|'
         r'cricket|match|ipl|football|bollywood|hollywood|actor|actress|'
         r'president|pm|minister|company|stock|crypto|bitcoin)\b',
+        # Hinglish quantity / identity factual questions — these always
+        # need live data (e.g. "Elon Musk ki networth kitni hain").
+        r'\b(kitna|kitni|kitne|kya hain|kya han|net ?worth|networth|'
+        r'kab tak|kaunsa|kon sa|kaun sa|kon hai)\b',
     ]
     for pat in current_intent:
         if re.search(pat, t, re.IGNORECASE):
@@ -497,16 +501,32 @@ async def _respond(uid: int, text: str, is_premium: bool,
 
     # Always attempt search — AI decides whether to use the results
     search_injected = False
+    searched_but_empty = False
     if _should_attempt_search(text):
         try:
             results = await search_summary(text, max_results=4)
             if results:
                 ctx += f"\n\n[SEARCH RESULTS — use only if relevant to the question]\n{results}\n[END SEARCH RESULTS]"
                 search_injected = True
+            else:
+                searched_but_empty = True
         except Exception as e:
             logger.debug(f"search failed in _respond: {e}")
+            searched_but_empty = True
 
-    # Build fresh system prompt (includes current IST time)
+    # Build fresh system prompt (includes current IST time).
+    # 🔴 If we TRIED to search (this is a factual/current question) but got
+    # NO real-time data, FORCE Iota to admit she can't check instead of
+    # inventing a confident answer from training memory — that's exactly
+    # the "Musk's wealth primarily comes from..." style wrong reply that
+    # looked like she ignored real-time search.
+    if searched_but_empty and not search_injected:
+        ctx += (
+            "\n\n⚠️ NO REAL-TIME DATA WAS RETRIEVED for this question. You MUST "
+            "reply ONLY with the in-character line 'abhī check nahī kar paayī, "
+            "thodi der baad try karo 🥺' and you MUST NEVER answer from memory "
+            "or guess any fact/number. No extra explanation."
+        )
     system = _build_system() + ctx
     messages = [{"role": "system", "content": system}] + hist
 
