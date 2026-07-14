@@ -17,6 +17,13 @@ import sys
 import os
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
+from telegram.error import BadRequest
+
+os.environ.setdefault("BOT_TOKEN", "123456:fake")
+os.environ.setdefault("OWNER_ID", "111111")
+os.environ.setdefault(
+    "MONGO_URI", "mongodb+srv://test:test@cluster0.mongodb.net/iota_bot"
+)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 IOTA = os.path.dirname(HERE)
@@ -184,7 +191,8 @@ class TestWhisperCommand(unittest.IsolatedAsyncioTestCase):
         ctx = _ctx(get_chat=lambda *a, **k: _user(321, "Named"))
         msg = await self._call("/whisper @named", ctx)
         out = msg.reply_html.call_args[0][0]
-        self.assertIn("Write a message", out)
+        # No-text now opens a private compose session (secret never in group).
+        self.assertIn("wspc", str(msg.reply_html.call_args.kwargs.get("reply_markup")))
         self.whisper.create_whisper.assert_not_awaited()
 
     # ── 9. .whisper dot-command routes through the same handler ──────────
@@ -199,6 +207,25 @@ class TestWhisperCommand(unittest.IsolatedAsyncioTestCase):
         args = self.whisper.create_whisper.call_args.args
         self.assertEqual(args[1], 321)
         self.assertEqual(args[3], "hello")
+
+    # ── 10. the command message (which contains the secret) is deleted ──
+    async def test_whisper_with_text_deletes_command_message(self):
+        ctx = _ctx(get_chat=lambda *a, **k: _user(321, "Named", username="named"))
+        msg = await self._call("/whisper @named hello", ctx)
+        self.whisper.create_whisper.assert_awaited_once()
+        msg.delete.assert_awaited_once()
+
+    # ── 11. no-text variant starts a PRIVATE compose (secret never in group) ──
+    async def test_whisper_no_text_starts_private_compose(self):
+        ctx = _ctx(get_chat=lambda *a, **k: _user(321, "Named", username="named"))
+        ctx.user_data = {}
+        msg = await self._call("/whisper @named", ctx)
+        # No whisper saved yet — the secret is collected privately.
+        self.whisper.create_whisper.assert_not_awaited()
+        # A compose button (wspc) is offered and the command message is deleted.
+        self.assertIn("wspc", str(msg.reply_html.call_args.kwargs.get("reply_markup")))
+        msg.delete.assert_awaited_once()
+        self.assertEqual(ctx.user_data[5]["wsp_draft"]["tid"], 321)
 
 
 class TestWhisperReadCallback(unittest.IsolatedAsyncioTestCase):
@@ -259,6 +286,79 @@ class TestWhisperReadCallback(unittest.IsolatedAsyncioTestCase):
         self.assertIn("secret", q.answer.call_args[0][0])
         self.whisper.mark_whisper_read.assert_awaited_once_with("abc")
         ctx.bot.send_message.assert_awaited_once()
+
+    # ── A stale/expired callback query must NOT crash the handler ────────
+    # (the deployed "Iota crashed on a command!" traceback came from an
+    #  unguarded q.answer() raising BadRequest: Query is too old.)
+    async def test_read_with_expired_query_does_not_crash(self):
+        w = {"target_id": 42, "text": "secret", "chat_id": -100,
+             "sender_id": 5, "read": False}
+        self.whisper.get_whisper.return_value = w
+        q = self._q("abc", uid=42)
+        q.answer = AsyncMock(side_effect=BadRequest("Query is too old"))
+        up = MagicMock(); up.callback_query = q; up.effective_user = q.from_user
+        ctx = MagicMock(); ctx.bot = MagicMock(); ctx.bot.send_message = AsyncMock()
+        # Must complete without raising.
+        await self.whisper.whisper_read_callback(up, ctx)
+        self.whisper.mark_whisper_read.assert_awaited_once_with("abc")
+        ctx.bot.send_message.assert_awaited_once()
+
+
+class TestWhisperPrivateCompose(unittest.IsolatedAsyncioTestCase):
+    """The secret is typed in DM, never in the group."""
+
+    def setUp(self):
+        import handlers.whisper as whisper
+        self.whisper = whisper
+        self.patchers = [
+            patch.object(whisper, "create_whisper", AsyncMock(return_value="wid9")),
+            patch.object(whisper, "get_whisper", AsyncMock(return_value=None)),
+            patch.object(whisper, "mark_whisper_read", AsyncMock()),
+        ]
+        for p in self.patchers:
+            p.start()
+
+    def tearDown(self):
+        for p in self.patchers:
+            p.stop()
+
+    def _dm_update(self, uid, text):
+        up = MagicMock()
+        u = MagicMock(); u.id = uid
+        up.effective_user = u
+        msg = MagicMock(); msg.text = text
+        msg.reply_html = AsyncMock()
+        up.effective_message = msg
+        chat = MagicMock(); chat.type = "private"
+        up.effective_chat = chat
+        return up
+
+    async def test_compose_captures_secret_from_dm(self):
+        ctx = MagicMock()
+        ctx.user_data = {5: {"wsp_draft": {"tid": 321, "tmention": "T", "cid": -100},
+                            "wsp_compose": True}}
+        ctx.bot = MagicMock()
+        ctx.bot.send_message = AsyncMock()
+        up = self._dm_update(5, "meet me at 9pm")
+        await self.whisper.whisper_dm_handler(up, ctx)
+        self.whisper.create_whisper.assert_awaited_once()
+        args = self.whisper.create_whisper.call_args.args
+        self.assertEqual(args[1], 321)            # target
+        self.assertEqual(args[2], -100)           # group chat id
+        self.assertEqual(args[3], "meet me at 9pm")
+        # Delivered to target via DM and a card posted to the group.
+        self.assertEqual(ctx.bot.send_message.await_count, 2)
+        # State cleared so the next DM is a normal message.
+        self.assertNotIn("wsp_compose", ctx.user_data[5])
+
+    async def test_compose_ignored_when_not_composing(self):
+        ctx = MagicMock()
+        ctx.user_data = {5: {}}   # not composing
+        ctx.bot = MagicMock(); ctx.bot.send_message = AsyncMock()
+        up = self._dm_update(5, "hello there")
+        await self.whisper.whisper_dm_handler(up, ctx)
+        self.whisper.create_whisper.assert_not_awaited()
+        ctx.bot.send_message.assert_not_awaited()
 
 
 if __name__ == "__main__":

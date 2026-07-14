@@ -486,6 +486,14 @@ async def dm_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     u = update.effective_user; msg = update.effective_message
     text = (msg.text or "").strip()
     if not text or text.startswith("/"): return
+    # While the user is privately composing a /whisper, their next message is
+    # the whisper body — never send it to the AI model (privacy). The compose
+    # handler pre-empts this one anyway, but this is a safety net.
+    try:
+        if (context.user_data.get(u.id) or {}).get("wsp_compose"):
+            return
+    except Exception:
+        pass
     if _is_emoji_only(text):
         # 🔴 FIX: without this, a pure-emoji DM got a reply from BOTH
         # this handler AND handlers.sticker_reply.emoji_only_handler —

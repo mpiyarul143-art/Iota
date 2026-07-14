@@ -157,7 +157,10 @@ def main():
     from handlers.connect import (
         connect_cmd, connect_callback, disconnect_cmd, connect_id_cmd
     )
-    from handlers.whisper import whisper_cmd, whisper_read_callback
+    from handlers.whisper import (
+        whisper_cmd, whisper_read_callback,
+        whisper_compose_callback, whisper_dm_handler,
+    )
     from handlers.slots_game import slots_cmd
     from handlers.quote_sticker import (
         quote_sticker_cmd, qrand_cmd, qtop_cmd, qrate_cmd, qcolor_cmd,
@@ -876,6 +879,7 @@ def main():
     app.add_handler(CallbackQueryHandler(werewolf_callback,      pattern=r"^ww_"))
     app.add_handler(CallbackQueryHandler(connect_callback,       pattern=r"^conn_"))
     app.add_handler(CallbackQueryHandler(whisper_read_callback,   pattern=r"^wsp:"))
+    app.add_handler(CallbackQueryHandler(whisper_compose_callback, pattern=r"^wspc$"))
     app.add_handler(CallbackQueryHandler(riddle_reveal_callback, pattern=r"^riddle_ans:"))
     app.add_handler(CallbackQueryHandler(giveaway_join_callback, pattern=r"^ga_join:"))
     app.add_handler(CallbackQueryHandler(join_request_callback, pattern=r"^jr_"))
@@ -1169,6 +1173,14 @@ def main():
         filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND,
         valentine_message_handler
     ), group=11)
+
+    # 11. Whisper private compose (captures the secret the sender types in DM,
+    #       registered just before the AI auto-reply so it can pre-empt it
+    #       during a compose session — the secret must never reach the model).
+    app.add_handler(MessageHandler(
+        filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND,
+        whisper_dm_handler
+    ), group=12)
 
     # 11. DM AI auto-reply (lowest priority)
     app.add_handler(MessageHandler(
