@@ -145,6 +145,35 @@ PREMIUM_DURATION_DAYS  = 90
 GEMS_PRICE_STARS       = 50
 GEMS_PRICE_COINS       = 10_000
 
+# ── Premium Banking System ──────────────────────────────────────────────────
+# The entire banking system (handlers/banking.py) is PREMIUM-ONLY and modelled
+# after real-life retail banking: a demand-deposit bank account (safe from
+# /rob), an interest-bearing savings vault, Fixed Deposits (FD), Recurring
+# Deposits (RD), a transaction passbook/statement, and user-owned Banks/Branches
+# that premium users can open once they hold 10 lakh (1,000,000) coins.
+PREMIUM_BANKING_CAP      = 1_000_000   # 10 lakh — max bank balance for a premium user
+BANK_OPEN_MIN_BALANCE    = 1_000_000   # need 10 lakh to open your own bank/branch
+
+# Demand-deposit (bank account) interest, compounded daily.
+BANK_DAILY_RATE         = 0.005        # 0.5%/day on the bank balance
+
+# Fixed Deposit (FD): total return over the chosen lock-in tenure.
+FD_TENURES               = {30: 0.06, 90: 0.12, 180: 0.22, 365: 0.45}
+FD_BREAK_PENALTY        = 0.10         # penalty if broken before maturity (on payout)
+
+# Recurring Deposit (RD): a fixed monthly installment, compounded monthly.
+RD_MIN_INSTALLMENT      = 1_000
+RD_MAX_MONTHS           = 24
+RD_MONTHLY_RATE         = 0.01         # 1%/month on contributions
+RD_BREAK_PENALTY        = 0.10
+
+# User-owned Banks/Branches: the bank pays its customers interest daily and the
+# owner earns a one-time fee on each customer deposit + interest on the reserve.
+BANK_CUSTOMER_DAILY_RATE = 0.008       # bank pays its depositors 0.8%/day
+BANK_OWNER_DEPOSIT_FEE   = 0.01        # owner keeps 1% of every customer deposit
+BANK_RATE_MIN            = 0.003       # owner-settable customer rate bounds
+BANK_RATE_MAX            = 0.015
+
 # ── Card ──────────────────────────────────────────────────────────────────
 CARD_FEE_PERCENT = 5
 CARD_XP_WIN      = 250
