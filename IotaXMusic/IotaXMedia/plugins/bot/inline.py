@@ -4,7 +4,7 @@ from pyrogram.types import (
     InlineKeyboardMarkup,
     InlineQueryResultPhoto,
 )
-from youtubesearchpython.aio import VideosSearch
+from IotaXMedia.platforms.ytsearch import VideosSearch
 
 from IotaXMedia.utils.inlinequery import answer
 from config import BANNED_USERS

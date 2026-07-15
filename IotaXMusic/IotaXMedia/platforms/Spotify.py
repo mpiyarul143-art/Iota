@@ -3,7 +3,7 @@ import re
 
 import spotipy
 from spotipy.oauth2 import SpotifyClientCredentials
-from youtubesearchpython.aio import VideosSearch
+from IotaXMedia.platforms.ytsearch import VideosSearch
 
 import config
 

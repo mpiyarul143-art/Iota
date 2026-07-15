@@ -4,7 +4,7 @@ import re
 import aiofiles
 import aiohttp
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont
-from youtubesearchpython.aio import VideosSearch
+from IotaXMedia.platforms.ytsearch import VideosSearch
 from config import YOUTUBE_IMG_URL
 from IotaXMedia.core.dir import CACHE_DIR 
 

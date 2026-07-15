@@ -41,4 +41,5 @@ pytgcrypto
 unidecode
 wget
 yt-dlp[default]==2025.12.8
-git+https://github.com/Iota/youtube-search-python
+youtube-search-python
+setuptools<81

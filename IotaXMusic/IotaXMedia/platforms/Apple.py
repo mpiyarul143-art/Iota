@@ -4,7 +4,7 @@ from typing import List, Union, Optional
 
 import aiohttp
 from bs4 import BeautifulSoup
-from youtubesearchpython.aio import VideosSearch
+from IotaXMedia.platforms.ytsearch import VideosSearch
 
 
 class AppleAPI:
