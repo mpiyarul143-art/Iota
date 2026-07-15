@@ -213,7 +213,7 @@ def main():
     )
     from handlers.utility      import (
         translate_cmd, voice_cmd, id_cmd, detail_cmd, owner_cmd,
-        admins_cmd, own_cmd, setgroup_cmd, topgroups_cmd,
+        admins_cmd, own_cmd, setgroup_cmd, topgroups_cmd, removegroup_cmd,
         last_seen_cmd, promoter_cmd, ref_stats_cmd
     )
     from handlers.intro        import (
@@ -273,7 +273,7 @@ def main():
         setpriority_cmd, toggleprovider_cmd
     )
     from handlers.owner_newsys import (
-        lockdown_cmd, unlock_cmd, slowall_cmd, lockall_cmd, unlockall_cmd,
+        lockdown_cmd, global_unlock_cmd, slowall_cmd, lockall_cmd, unlockall_cmd,
         shieldstatus_cmd, massban_cmd, massunban_cmd, banfrom_cmd, unbanfrom_cmd,
         cleanbots_cmd, botgate_cmd, allowedbots_cmd, watchuser_cmd, unwatch_cmd,
         watchlist_cmd, suslist_cmd, schedbroadcast_cmd, schedmsg_cmd, remindall_cmd,
@@ -358,6 +358,32 @@ def main():
         bankdeposit_cmd, bankwithdraw_cmd, setbankname_cmd, setbankrate_cmd,
         closebank_cmd,
     )
+    from handlers.business import (
+        business_cmd, openbusiness_cmd, bizcollect_cmd, bizupgrade_cmd,
+        bizinfo_cmd, businesses_cmd, hire_cmd, bizfire_cmd, bizjob_cmd,
+        bizquit_cmd, bizinvest_cmd, bizdivest_cmd, bizinvestments_cmd,
+        robbiz_cmd, bizrename_cmd, bizclose_cmd, biz_offer_callback,
+        business_maintenance_loop, biztypes_cmd, bizstats_cmd,
+        bizemployees_cmd, bizpromote_cmd, bizdemote_cmd, bizbonus_cmd,
+        bizpenalty_cmd, bizrate_cmd, bizselect_cmd,
+    )
+    # 🆕 Business Empire (premium-only). Mirrors the banking commands block
+    # above; every handler is gated by @premium_gate + @economy_gate internally.
+    for c, f in [
+        ("business", business_cmd), ("openbusiness", openbusiness_cmd),
+        ("bizcollect", bizcollect_cmd), ("bizupgrade", bizupgrade_cmd),
+        ("bizinfo", bizinfo_cmd), ("businesses", businesses_cmd),
+        ("hire", hire_cmd), ("bizfire", bizfire_cmd), ("bizjob", bizjob_cmd),
+        ("bizquit", bizquit_cmd), ("bizinvest", bizinvest_cmd),
+        ("bizdivest", bizdivest_cmd), ("bizinvestments", bizinvestments_cmd),
+        ("robbiz", robbiz_cmd), ("bizrename", bizrename_cmd),
+        ("bizclose", bizclose_cmd), ("biztypes", biztypes_cmd),
+        ("bizstats", bizstats_cmd), ("bizemployees", bizemployees_cmd),
+        ("bizpromote", bizpromote_cmd), ("bizdemote", bizdemote_cmd),
+        ("bizbonus", bizbonus_cmd), ("bizpenalty", bizpenalty_cmd),
+        ("bizrate", bizrate_cmd), ("bizselect", bizselect_cmd),
+    ]:
+        app.add_handler(CommandHandler(c, f))
     from handlers.marketplace import bazaar_cmd
 
     # ── /start /help ──────────────────────────────────────────────────
@@ -449,6 +475,25 @@ def main():
         ("bankwithdraw", bankwithdraw_cmd), ("setbankname", setbankname_cmd),
         ("setbankrate", setbankrate_cmd), ("closebank", closebank_cmd),
         ("lottery", lottery_cmd), ("bazaar", bazaar_cmd),
+    ]:
+        app.add_handler(CommandHandler(c, f))
+
+    # 🆕 Business Empire (premium-only). Every handler is gated internally by
+    # @premium_gate + @economy_gate, so they behave exactly like the banking
+    # commands. The till fills passively; a rival can /robbiz the uncollected income.
+    for c, f in [
+        ("business", business_cmd), ("openbusiness", openbusiness_cmd),
+        ("bizcollect", bizcollect_cmd), ("bizupgrade", bizupgrade_cmd),
+        ("bizinfo", bizinfo_cmd), ("businesses", businesses_cmd),
+        ("hire", hire_cmd), ("bizfire", bizfire_cmd), ("bizjob", bizjob_cmd),
+        ("bizquit", bizquit_cmd), ("bizinvest", bizinvest_cmd),
+        ("bizdivest", bizdivest_cmd), ("bizinvestments", bizinvestments_cmd),
+        ("robbiz", robbiz_cmd), ("bizrename", bizrename_cmd),
+        ("bizclose", bizclose_cmd), ("biztypes", biztypes_cmd),
+        ("bizstats", bizstats_cmd), ("bizemployees", bizemployees_cmd),
+        ("bizpromote", bizpromote_cmd), ("bizdemote", bizdemote_cmd),
+        ("bizbonus", bizbonus_cmd), ("bizpenalty", bizpenalty_cmd),
+        ("bizrate", bizrate_cmd), ("bizselect", bizselect_cmd),
     ]:
         app.add_handler(CommandHandler(c, f))
 
@@ -640,6 +685,7 @@ def main():
         ("tr",translate_cmd),("voice",voice_cmd),("id",id_cmd),
         ("detail",detail_cmd),("owner",owner_cmd),("admins",admins_cmd),
         ("own",own_cmd),("setgroup",setgroup_cmd),("topgroups",topgroups_cmd),
+        ("removegroup",removegroup_cmd),
         ("last_seen",last_seen_cmd),("promoter",promoter_cmd),
         ("ref_stats",ref_stats_cmd),
         ("ai",ai_cmd),("ask",ai_cmd),("clearmemory",clear_my_memory_cmd),
@@ -747,7 +793,7 @@ def main():
 
     # ── 🆕 Owner Systems (new powerful subsystems) ────────────────────
     for c, f in [
-        ("ownersys",ownersys_cmd),("lockdown",lockdown_cmd),("unlock",unlock_cmd),
+        ("ownersys",ownersys_cmd),("lockdown",lockdown_cmd),("globalunlock",global_unlock_cmd),
         ("slowall",slowall_cmd),("lockall",lockall_cmd),("unlockall",unlockall_cmd),
         ("shieldstatus",shieldstatus_cmd),
         ("massban",massban_cmd),("massunban",massunban_cmd),("banfrom",banfrom_cmd),
@@ -889,6 +935,9 @@ def main():
     app.add_handler(CallbackQueryHandler(chess_callback,    pattern=r"^ch_"))
     app.add_handler(CallbackQueryHandler(tournament_callback, pattern=r"^tour_"))
     app.add_handler(CallbackQueryHandler(quote_rate_callback, pattern=r"^qr_"))
+    # 🏢 Business Empire job-offer accept/decline buttons (mailbox style).
+    app.add_handler(CallbackQueryHandler(biz_offer_callback,  pattern=r"^biz(acc|dec):"))
+    app.add_handler(CallbackQueryHandler(biz_offer_callback, pattern=r"^biz(acc|dec):"))
 
     # ── Inline queries (net-new) ────────────────────────────────────────
     from telegram.ext import InlineQueryHandler
@@ -1290,6 +1339,12 @@ def main():
         # 🏦 Banking maintenance: daily savings interest + loan overdue penalty
         from handlers.banking import banking_maintenance_loop
         asyncio.create_task(banking_maintenance_loop(application.bot))
+        # 🏢 Business Empire maintenance: hourly till accrual + daily salary payouts.
+        from handlers.business import business_maintenance_loop
+        asyncio.create_task(business_maintenance_loop(application.bot))
+        # 🏢 Business Empire maintenance: hourly till accrual + salary payouts.
+        from handlers.business import business_maintenance_loop
+        asyncio.create_task(business_maintenance_loop(application.bot))
         # 🔁 Keep a Render/pass free Web Service awake 24/7 by self-pinging
         # its own /health route (prevents the 15-min inactivity spin-down
         # that would otherwise kill the long-poll bot too).

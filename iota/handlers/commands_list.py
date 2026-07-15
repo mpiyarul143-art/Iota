@@ -15,7 +15,9 @@ from collections import OrderedDict
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import ContextTypes
 
-from utils.command_catalog import all_categories, CATALOG, get_usecase, total_documented
+from utils.command_catalog import (
+    all_categories, CATALOG, get_usecase, total_documented, OWNER_ONLY_CMDS,
+)
 from utils.dm_redirect import require_dm
 from utils.safe_html import safe_html
 from handlers.owner_panel import _is_privileged
@@ -35,9 +37,17 @@ def _visible_categories(privileged: bool):
     cats = all_categories()
     if privileged:
         return cats
-    return OrderedDict(
-        (c, cmds) for c, cmds in cats.items() if c not in OWNER_ONLY_CATS
-    )
+    out = OrderedDict()
+    for c, cmds in cats.items():
+        # Skip whole owner-only categories.
+        if c in OWNER_ONLY_CATS:
+            continue
+        # Drop individual owner-only commands that live inside public
+        # categories (e.g. userslist/premiumlist inside "Info").
+        filtered = [(cmd, uc) for cmd, uc in cmds if cmd not in OWNER_ONLY_CMDS]
+        if filtered:
+            out[c] = filtered
+    return out
 
 
 def _menu_kb(page: int = 0, privileged: bool = False):

@@ -3,7 +3,7 @@ import aiohttp, time
 from telegram import Update
 from telegram.ext import ContextTypes
 from utils.mongo_db import (ensure_user, get_user, get_user_rank,
-                             set_top_group, get_top_groups,
+                             set_top_group, get_top_groups, remove_top_group,
                              get_sticker_pack, set_sticker_pack,
                              get_last_seen, update_last_seen,
                              add_promoter, get_promoter, get_promoter_by_code,
@@ -361,6 +361,29 @@ async def topgroups_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for i, r in enumerate(rows[:5]):
         text += f"{medals[i]} <a href='{r['group_link']}'>{r['group_name']}</a>\n"
     await update.message.reply_html(text, disable_web_page_preview=True)
+
+async def removegroup_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    u = update.effective_user
+    await ensure_user(u.id, u.username or "", u.full_name)
+    rank = await get_user_rank(u.id)
+    if rank > 5:
+        await update.message.reply_html(
+            f"❌ {sc('Only Top 5 Richest Can Manage Groups!')}\n"
+            f"{sc('Your Rank')}: #{rank}"
+        ); return
+    if not context.args:
+        await update.message.reply_html("Usage: /removegroup &lt;rank 1-5&gt;"); return
+    try:
+        slot = int(context.args[0])
+    except ValueError:
+        await update.message.reply_html("❌ Rank must be a number 1-5!"); return
+    if not (1 <= slot <= 5):
+        await update.message.reply_html("❌ Rank must be between 1 and 5!"); return
+    rows = {r["_id"]: r for r in await get_top_groups()}
+    if slot not in rows:
+        await update.message.reply_html(f"❌ {sc('No group set at rank')} #{slot}!"); return
+    await remove_top_group(slot)
+    await update.message.reply_html(f"✅ {sc('Group removed from rank')} #{slot}!")
 
 # ── /promoter system ──────────────────────────────────────────────────────────
 

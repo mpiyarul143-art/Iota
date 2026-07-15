@@ -244,6 +244,7 @@ CATALOG = {
     "link": ["Group Tools", "Save a group link."],
     "del_link": ["Group Tools", "Delete a saved link."],
     "setgroup": ["Group Tools", "Link your account to a group."],
+    "removegroup": ["Group Tools", "Remove a group from your top groups (rank 1-5)."],
     "topgroups": ["Group Tools", "Top groups by activity."],
     "last_seen": ["Group Tools", "See when a user was last seen."],
 
@@ -509,6 +510,33 @@ CATALOG = {
     "setbankrate": ["Premium Banking", "Set your bank's customer interest rate."],
     "closebank": ["Premium Banking", "Close your bank (returns all deposits)."],
 
+    # ── Premium Business Empire (Enterprise) ─────────────────────────
+    "business": ["Business", "Your business overview (till, staff, investors, popularity, rating)."],
+    "openbusiness": ["Business", "Open a business (Premium + cost + license fee; tier & global-limit gated)."],
+    "bizcollect": ["Business", "Collect income (tax + maintenance deducted, investor dividends paid)."],
+    "bizupgrade": ["Business", "Upgrade your business (more income / bigger till / higher valuation)."],
+    "bizinfo": ["Business", "View any business's public info (incl. limited-status)."],
+    "businesses": ["Business", "Leaderboard of Iota's top businesses by valuation."],
+    "hire": ["Business", "Offer a user a staff job (role bonuses + skill)."],
+    "bizfire": ["Business", "Fire an employee."],
+    "bizjob": ["Business", "View the job you're employed in (level, efficiency, earnings)."],
+    "bizquit": ["Business", "Quit your job."],
+    "bizinvest": ["Business", "Invest coins to become a shareholder (dividends + income bonus)."],
+    "bizdivest": ["Business", "Pull your investment out (early-exit fee)."],
+    "bizinvestments": ["Business", "Your active investments / dividends."],
+    "robbiz": ["Business", "Rob a business's uncollected till (Premium; guards reduce take)."],
+    "bizrename": ["Business", "Rename your business."],
+    "bizclose": ["Business", "Close your business (refunds till + investors)."],
+    "biztypes": ["Business", "Browse all business types, costs, license fees & global limits."],
+    "bizstats": ["Business", "Analytics dashboard: revenue, expenses, profit, rating, valuation."],
+    "bizemployees": ["Business", "List your employees with level / efficiency / earnings."],
+    "bizpromote": ["Business", "Promote an employee (costs a fee; raises efficiency)."],
+    "bizdemote": ["Business", "Demote an employee (lowers efficiency)."],
+    "bizbonus": ["Business", "Give an employee a one-off bonus from your wallet."],
+    "bizpenalty": ["Business", "Penalise an employee (hits efficiency & mood)."],
+    "bizrate": ["Business", "Leave a 1–5★ customer rating for a business."],
+    "bizselect": ["Business", "Switch your active business (if you own several)."],
+
     # ── Misc ────────────────────────────────────────────────────────
     "start": ["Core", "Start / welcome message."],
     "help": ["Core", "Show help / command guide."],
@@ -536,7 +564,8 @@ CATALOG = {
 
 # Friendly display order for categories in the /commands menu.
 CATEGORY_ORDER = [
-    "Core", "Fun", "Romance", "Economy", "Premium", "Premium Banking", "Games",
+    "Core", "Fun", "Romance", "Economy", "Premium", "Premium Banking", "Business",
+    "Games",
     "Group Admin", "Group Tools", "Anti-Abuse", "Utility", "Stickers", "Items",
     "Village", "Stats", "Info", "Owner", "Owner Systems", "Legal", "Misc",
 ]
@@ -544,6 +573,20 @@ CATEGORY_ORDER = [
 
 def get_category(cmd: str) -> str:
     return CATALOG.get(cmd, ["Misc", ""])[0]
+
+
+# Owner/staff-only commands that live INSIDE otherwise-public categories
+# (e.g. "userslist"/"premiumlist" live in "Info"). They must be hidden from
+# the public /commands catalog — the command still executes, but only the
+# owner can actually run it. OWNER_ONLY_CATS hides whole categories; this
+# list hides individual owner commands that leak into public categories.
+OWNER_ONLY_CMDS = {
+    "userslist", "premiumlist", "own", "raidlog", "repair", "scan",
+}
+
+
+def is_owner_only(cmd: str) -> bool:
+    return cmd in OWNER_ONLY_CMDS
 
 
 def get_usecase(cmd: str) -> str:

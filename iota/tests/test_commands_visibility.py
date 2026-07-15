@@ -39,6 +39,25 @@ class TestOwnerCategoryVisibility(unittest.TestCase):
         self.assertTrue(len(cats["Owner"]) > 0)
         self.assertTrue(len(cats["Owner Systems"]) > 0)
 
+    def test_owner_only_cmds_hidden_in_public_categories(self):
+        # Owner-only commands that live inside otherwise-public categories
+        # (e.g. userslist/premiumlist inside "Info") must NOT be visible to a
+        # normal user — but must remain visible to the owner.
+        pub = cl._visible_categories(privileged=False)
+        pub_flat = [cmd for cmds in pub.values() for cmd, _ in cmds]
+        for hidden in ("userslist", "premiumlist"):
+            self.assertNotIn(hidden, pub_flat)
+        # The public "Info" category must still exist with its user commands.
+        self.assertIn("Info", pub)
+        info_cmds = [c for c, _ in pub["Info"]]
+        self.assertIn("profile", info_cmds)
+        self.assertNotIn("userslist", info_cmds)
+
+        own = cl._visible_categories(privileged=True)
+        own_flat = [cmd for cmds in own.values() for cmd, _ in cmds]
+        self.assertIn("userslist", own_flat)
+        self.assertIn("premiumlist", own_flat)
+
     def test_full_file_excludes_owner_for_normal(self):
         # The downloadable file is built from _visible_categories, so a normal
         # user's export must never contain the owner-only commands — including

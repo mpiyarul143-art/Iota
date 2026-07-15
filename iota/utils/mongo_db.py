@@ -1145,6 +1145,9 @@ async def set_top_group(rank, uid, name, link):
 async def get_top_groups():
     return await get_db().top_groups.find(sort=[("_id",1)]).to_list(5)
 
+async def remove_top_group(rank):
+    await get_db().top_groups.delete_one({"_id": rank})
+
 async def is_gaming_open(cid):
     """Back-compat shim — now reads from the unified system-status doc
     (see get_system_status below) instead of its own separate flag, so
@@ -1260,6 +1263,15 @@ async def create_indexes():
         await db.recurring_deposits.create_index([("next_due_ts",1)])
         await db.banks.create_index([("owner_id",1)])
         await db.bank_txns.create_index([("uid",1),("ts",-1)])
+    except Exception: pass
+    try:
+        # 🏢 Business Empire (handlers/business.py + utils/business_store.py)
+        await db.businesses.create_index([("owner_id",1),("active",1)])
+        await db.businesses.create_index([("type",1),("active",1)])
+        await db.businesses.create_index([("active",1),("total_earned",-1)])
+        await db.businesses.create_index([("active",1),("next_salary_ts",1)])
+        await db.business_offers.create_index([("target_id",1),("status",1)])
+        await db.business_offers.create_index([("biz_id",1),("target_id",1)])
     except Exception: pass
     print("✅ MongoDB indexes created")
 

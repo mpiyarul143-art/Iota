@@ -203,12 +203,12 @@ async def lockdown_cmd(update, context):
         f"🔒 <b>Global lockdown ENGAGED.</b>\n\n"
         f"Reason: {safe_html(reason)}\n"
         f"Groups locked: <b>{ok}</b> · skipped (no admin): <b>{skipped}</b>\n\n"
-        f"Use /unlock to release."
+        f"Use /globalunlock to release."
     )
 
 
 @owner_only
-async def unlock_cmd(update, context):
+async def global_unlock_cmd(update, context):
     """Release the global lockdown."""
     ok, skipped = await _apply_to_admin_groups(context, perms=_OPEN)
     await set_shield(lockdown=False, reason="")
@@ -1260,7 +1260,7 @@ async def ownersys_cmd(update, context):
     """Show the new owner-systems command index."""
     await _reply(update,
         "👑 <b>Owner Systems — NEW</b>\n\n"
-        "🛡️ <b>Shield:</b> /lockdown /unlock /slowall /lockall /unlockall /shieldstatus\n"
+        "🛡️ <b>Shield:</b> /lockdown /globalunlock /slowall /lockall /unlockall /shieldstatus\n"
         "🛡️ <b>Anti-Abuse:</b> /massban /massunban /banfrom /unbanfrom /cleanbots "
         "/botgate /allowedbots /watchuser /unwatch /watchlist /suslist\n"
         "⏰ <b>Schedule:</b> /schedbroadcast /schedmsg /remindall /scheds /cancelsched\n"
