@@ -18,8 +18,6 @@ BOT_LIST = [
 
 @app.on_message(filters.command("botschk") & filters.group)
 async def check_bots_command(client, message):
-    global last_checked_time
-
     if message.from_user.id != OWNER_ID:
         return await message.reply_text("🚫 You are not authorized to use this command.")
 

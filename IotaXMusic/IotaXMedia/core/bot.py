@@ -58,4 +58,24 @@ class MusicBotClient(Client):
                 LOGGER(__name__).error(f"❌ Could not check admin status: {e}")
                 sys.exit()
 
+        # ── Command menu scoping: hide owner/sudo commands from normal users
+        try:
+            from IotaXMedia.utils.bot_commands import (
+                DEFAULT_COMMANDS,
+                owner_command_list,
+            )
+            from pyrogram.types import BotCommandScopeDefault, BotCommandScopeChat
+
+            await self.set_bot_commands(
+                DEFAULT_COMMANDS, scope=BotCommandScopeDefault()
+            )
+            if config.OWNER_ID and config.OWNER_ID != 0:
+                await self.set_bot_commands(
+                    owner_command_list(),
+                    scope=BotCommandScopeChat(config.OWNER_ID),
+                )
+            LOGGER(__name__).info("✅ Bot command menu set (owner-scoped).")
+        except Exception as exc:
+            LOGGER(__name__).warning(f"⚠️ Could not set bot command menu: {exc}")
+
         LOGGER(__name__).info(f"✅ Music Bot started as {self.name} (@{self.username})")
