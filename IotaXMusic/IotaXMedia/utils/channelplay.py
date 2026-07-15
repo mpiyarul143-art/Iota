@@ -1,4 +1,4 @@
-﻿# Authored By Iota Coders © 2025
+# Authored By Iota Coders © 2025
 from IotaXMedia import app
 from IotaXMedia.utils.database import get_cmode
 

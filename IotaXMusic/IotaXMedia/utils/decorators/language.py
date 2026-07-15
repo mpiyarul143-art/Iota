@@ -1,4 +1,4 @@
-﻿# Authored By Iota Coders © 2025
+# Authored By Iota Coders © 2025
 from IotaXMedia import app
 from config import SUPPORT_CHAT
 from IotaXMedia.misc import SUDOERS

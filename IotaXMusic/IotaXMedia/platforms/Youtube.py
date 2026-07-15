@@ -1,4 +1,4 @@
-﻿# Authored By Iota Coders © 2025
+# Authored By Iota Coders © 2025
 import asyncio
 import contextlib
 import json
@@ -215,7 +215,7 @@ class YouTubeAPI:
                 "yt-dlp", *(_cookies_args()), "--dump-json", "--no-warnings", prepared_link
             )
 
-            def _both_failed(details: str) -> ValueError:
+            def _both_failed(details: str, search_err: Exception = search_err) -> ValueError:
                 return ValueError(
                     f"Both methods failed for '{prepared_link}':\n"
                     f"  1. youtubesearchpython error: {search_err}\n"

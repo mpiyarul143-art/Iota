@@ -1,4 +1,4 @@
-﻿# Authored By Iota Coders © 2025
+# Authored By Iota Coders © 2025
 import os
 
 from config import autoclean

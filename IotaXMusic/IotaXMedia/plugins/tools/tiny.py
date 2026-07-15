@@ -1,8 +1,8 @@
-﻿# Authored By Iota Coders © 2025
+# Authored By Iota Coders © 2025
 import os
 import cv2
 from PIL import Image
-from pyrogram import Client, filters
+from pyrogram import filters
 from IotaXMedia import app
 
 

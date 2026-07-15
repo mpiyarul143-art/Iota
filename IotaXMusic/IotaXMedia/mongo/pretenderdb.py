@@ -1,4 +1,4 @@
-﻿# Authored By Iota Coders © 2025
+# Authored By Iota Coders © 2025
 from IotaXMedia.core.mongo import mongodb
 
 impdb = mongodb["pretender"]

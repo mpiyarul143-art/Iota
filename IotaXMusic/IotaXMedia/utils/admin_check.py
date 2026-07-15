@@ -1,4 +1,4 @@
-﻿# Authored By Iota Coders © 2025
+# Authored By Iota Coders © 2025
 from pyrogram.types import CallbackQuery
 from pyrogram.enums import ChatType, ChatMemberStatus
 

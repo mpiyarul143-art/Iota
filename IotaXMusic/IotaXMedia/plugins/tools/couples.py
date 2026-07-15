@@ -1,5 +1,5 @@
-﻿# Authored By Iota Coders © 2025
-import os
+# Authored By Iota Coders © 2025
+
 import random
 from datetime import datetime, timedelta
 from pathlib import Path

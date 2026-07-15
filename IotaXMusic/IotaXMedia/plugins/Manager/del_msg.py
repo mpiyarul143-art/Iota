@@ -1,4 +1,4 @@
-﻿# Authored By Iota Coders © 2025
+# Authored By Iota Coders © 2025
 import asyncio
 
 from pyrogram import filters, enums
@@ -14,7 +14,7 @@ from pyrogram.types import ChatAdministratorRights as _Priv
 
 from IotaXMedia import app
 from IotaXMedia.logging import LOGGER as _LOGGER_FACTORY
-from IotaXMedia.misc import SUDOERS
+
 from IotaXMedia.utils.database import get_assistant
 from IotaXMedia.utils.permissions import is_owner_or_sudoer, mention
 

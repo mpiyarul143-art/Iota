@@ -1,4 +1,4 @@
-﻿# Authored By Iota Coders © 2025
+# Authored By Iota Coders © 2025
 from pyrogram import filters
 from IotaXMedia import app
 from config import OWNER_ID

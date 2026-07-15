@@ -1,4 +1,4 @@
-﻿# Authored By Iota Coders © 2025
+# Authored By Iota Coders © 2025
 import asyncio
 import re
 from typing import Any, Dict, Optional, Tuple, Union

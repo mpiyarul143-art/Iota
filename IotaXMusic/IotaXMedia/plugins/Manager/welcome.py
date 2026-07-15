@@ -1,11 +1,11 @@
-﻿# Authored By Iota Coders © 2025
+# Authored By Iota Coders © 2025
 import os
 import asyncio
 from functools import lru_cache
 from PIL import Image, ImageDraw, ImageFont
 from pyrogram import filters, enums
 from pyrogram.types import Message, ChatMemberUpdated, InlineKeyboardMarkup, InlineKeyboardButton
-from pyrogram.errors import TopicClosed, PeerIdInvalid, ChannelPrivate, SlowmodeWait
+
 from IotaXMedia import app
 from IotaXMedia.mongo.welcomedb import is_on, set_state, bump, cool, auto_on
 

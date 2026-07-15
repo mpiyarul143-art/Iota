@@ -1,4 +1,4 @@
-﻿# Authored By Iota Coders © 2025
+# Authored By Iota Coders © 2025
 import time
 from pyrogram.types import InlineKeyboardButton
 from IotaXMedia.utils.formatters import time_to_seconds

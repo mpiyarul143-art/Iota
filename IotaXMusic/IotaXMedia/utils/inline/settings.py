@@ -1,4 +1,4 @@
-﻿# Authored By Iota Coders © 2025
+# Authored By Iota Coders © 2025
 from typing import Union
 
 from pyrogram.types import InlineKeyboardButton

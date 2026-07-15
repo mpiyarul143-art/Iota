@@ -1,4 +1,4 @@
-﻿# Authored By Iota Coders © 2025
+# Authored By Iota Coders © 2025
 from .Apple import AppleAPI
 from .Carbon import CarbonAPI
 from .Resso import RessoAPI

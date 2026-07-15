@@ -1,4 +1,4 @@
-﻿# Authored By Iota Coders © 2025
+# Authored By Iota Coders © 2025
 import asyncio
 import random
 import string
@@ -12,7 +12,7 @@ import config
 from config import AYU, BANNED_USERS, lyrical
 from IotaXMedia import Apple, Resso, SoundCloud, Spotify, Telegram, YouTube, app
 from IotaXMedia.core.call import StreamController
-from IotaXMedia.utils import seconds_to_min, time_to_seconds
+from IotaXMedia.utils import time_to_seconds
 from IotaXMedia.utils.channelplay import get_channeplayCB
 from IotaXMedia.utils.decorators.language import languageCB
 from IotaXMedia.utils.decorators.play import PlayWrapper
@@ -88,7 +88,6 @@ async def play_command(
         if audio_telegram.file_size > config.TG_AUDIO_FILESIZE_LIMIT:
             return await mystic.edit_text(_["play_5"])
 
-        duration_min = seconds_to_min(audio_telegram.duration)
         if audio_telegram.duration > config.DURATION_LIMIT:
             return await mystic.edit_text(
                 _["play_6"].format(config.DURATION_LIMIT_MIN, app.mention)

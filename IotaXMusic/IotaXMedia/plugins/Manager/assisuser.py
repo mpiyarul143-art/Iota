@@ -1,4 +1,4 @@
-﻿# Authored By Iota Coders © 2025
+# Authored By Iota Coders © 2025
 import asyncio
 from pyrogram import filters
 from pyrogram.enums import ChatMemberStatus
@@ -29,7 +29,7 @@ async def _is_participant(client, chat_id: int, user_id: int) -> bool:
         return member.status in ACTIVE_STATUSES
     except (UserNotParticipant, PeerIdInvalid):
         return False
-    except Exception as e:
+    except Exception:
         return False
 
 async def join_userbot(app, chat_id: int, chat_username: str = None) -> str:
@@ -66,7 +66,7 @@ async def join_userbot(app, chat_id: int, chat_username: str = None) -> str:
             return "**🤖 Assistant is already a participant.**"
         except FloodWait as e:
             if attempt == max_retries - 1:
-                return f"**❌ Failed to add assistant after retries:** Flood wait exceeded."
+                return "**❌ Failed to add assistant after retries:** Flood wait exceeded."
             await asyncio.sleep(e.value)
         except Exception as e:
             return f"**❌ Failed to add assistant:** `{str(e)}`"
@@ -100,7 +100,7 @@ async def approve_join_request(client, chat_join_request: ChatJoinRequest):
             await client.send_message(chat_id, "**✅ Assistant has been approved and joined the chat.**")
         except ChatWriteForbidden:
             pass
-    except Exception as e:
+    except Exception:
         pass
 
 @app.on_message(
@@ -208,7 +208,7 @@ async def leave_all(app, message):
             await asyncio.sleep(0.5)
     except FloodWait as e:
         await asyncio.sleep(e.value)
-    except Exception as e:
+    except Exception:
         pass
     finally:
         try:

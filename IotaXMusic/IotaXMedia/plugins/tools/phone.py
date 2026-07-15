@@ -1,4 +1,4 @@
-﻿# Authored By Iota Coders © 2025
+# Authored By Iota Coders © 2025
 import aiohttp
 from pyrogram import filters
 from pyrogram.enums import ParseMode

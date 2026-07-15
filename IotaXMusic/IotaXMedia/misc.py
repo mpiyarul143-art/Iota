@@ -1,4 +1,4 @@
-﻿# Authored By Iota Coders © 2025
+# Authored By Iota Coders © 2025
 import socket
 import time
 import heroku3
@@ -30,7 +30,6 @@ def dbb():
     LOGGER(__name__).info("ᴅᴀᴛᴀʙᴀsᴇ ʟᴏᴀᴅᴇᴅ sᴜᴄᴄᴇssғᴜʟʟʏ💗")
 
 async def sudo():
-    global SUDOERS
     SUDOERS.add(OWNER_ID)
     sudoersdb = mongodb.sudoers
     data = await sudoersdb.find_one({"sudo": "sudo"}) or {}

@@ -1,4 +1,4 @@
-﻿# Authored By Iota Coders © 2025
+# Authored By Iota Coders © 2025
 import asyncio
 import time
 
@@ -12,7 +12,7 @@ from IotaXMedia.misc import db
 from IotaXMedia.utils.database import get_assistant, get_authuser_names, get_cmode
 from IotaXMedia.utils.decorators import AdminActual, language
 from IotaXMedia.utils.formatters import alpha_to_int, get_readable_time
-from config import BANNED_USERS, adminlist, lyrical
+from config import BANNED_USERS, adminlist
 
 
 

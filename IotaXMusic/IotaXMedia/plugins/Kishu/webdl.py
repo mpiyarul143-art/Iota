@@ -1,4 +1,4 @@
-﻿# Authored By Iota Coders © 2025
+# Authored By Iota Coders © 2025
 import requests
 import os
 from pyrogram import Client, filters, enums

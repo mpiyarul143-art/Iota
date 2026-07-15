@@ -1,4 +1,4 @@
-﻿# Authored By Iota Coders © 2025
+# Authored By Iota Coders © 2025
 import re
 from pyrogram import Client, filters
 from pyrogram.types import Message

@@ -1,4 +1,4 @@
-﻿# Authored By Iota Coders © 2025
+# Authored By Iota Coders © 2025
 import asyncio
 import shlex
 from typing import Tuple
@@ -44,7 +44,7 @@ def git():
             UPSTREAM_REPO = config.UPSTREAM_REPO
         try:
             repo = Repo()
-            LOGGER(__name__).info(f"Git Client Found [VPS DEPLOYER]")
+            LOGGER(__name__).info("Git Client Found [VPS DEPLOYER]")
         except (GitCommandError, InvalidGitRepositoryError):
             # Not a git repo (e.g. deployed as a subfolder) – skip self-update.
             LOGGER(__name__).info("No git repository found – skipping self-update.")
@@ -67,6 +67,6 @@ def git():
         except GitCommandError:
             repo.git.reset("--hard", "FETCH_HEAD")
         install_req("pip3 install --no-cache-dir -r requirements.txt")
-        LOGGER(__name__).info(f"Fetching updates from upstream repository...")
+        LOGGER(__name__).info("Fetching updates from upstream repository...")
     except Exception as exc:
         LOGGER(__name__).warning(f"Self-update skipped: {type(exc).__name__}: {exc}")

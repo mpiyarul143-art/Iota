@@ -1,4 +1,4 @@
-﻿# Authored By Iota Coders © 2025
+# Authored By Iota Coders © 2025
 import asyncio
 import html
 from typing import List
@@ -353,7 +353,7 @@ async def execute_zombie_cleanup(_: Client, cq: CallbackQuery):
     zombies = await scan_deleted_members(chat_id)
     total = len(zombies)
 
-    status = await cq.edit_message_text(f"<i>Starting cleanup...</i>", parse_mode=enums.ParseMode.HTML)
+    status = await cq.edit_message_text("<i>Starting cleanup...</i>", parse_mode=enums.ParseMode.HTML)
     removed = 0
 
     async def ban_user(uid):

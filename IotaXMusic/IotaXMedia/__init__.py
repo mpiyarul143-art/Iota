@@ -1,4 +1,4 @@
-﻿# Authored By Iota Coders © 2025
+# Authored By Iota Coders © 2025
 from IotaXMedia.core.bot import MusicBotClient
 from IotaXMedia.core.dir import StorageManager
 from IotaXMedia.core.git import git

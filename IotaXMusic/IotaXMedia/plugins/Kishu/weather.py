@@ -1,4 +1,4 @@
-﻿# Authored By Iota Coders © 2025
+# Authored By Iota Coders © 2025
 import httpx
 from pyrogram import Client, filters, enums
 from pyrogram.types import Message

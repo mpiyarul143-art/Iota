@@ -1,4 +1,4 @@
-﻿# Authored By Iota Coders © 2025
+# Authored By Iota Coders © 2025
 import os
 import textwrap
 from PIL import Image, ImageDraw, ImageFont

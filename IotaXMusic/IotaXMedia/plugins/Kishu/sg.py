@@ -1,4 +1,4 @@
-﻿# Authored By Iota Coders © 2025
+# Authored By Iota Coders © 2025
 import asyncio
 import random
 
@@ -34,7 +34,7 @@ async def sg(client: Client, message: Message):
                 user = await client.get_users(target_input)
                 target_user_id = user.id
 
-    except Exception as e:
+    except Exception:
         return await status_msg.edit("❌ Invalid user. Please reply to a user or provide a valid username/id.")
 
     sangmata_bots = ["sangmata_bot", "sangmata_beta_bot"]

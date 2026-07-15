@@ -1,4 +1,4 @@
-﻿# Authored By Iota Coders © 2025
+# Authored By Iota Coders © 2025
 from pyrogram.enums import MessageEntityType
 from pyrogram.types import Message, User
 

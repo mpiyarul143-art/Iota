@@ -1,4 +1,4 @@
-﻿# Authored By Iota Coders © 2025
+# Authored By Iota Coders © 2025
 import os
 import re
 import subprocess
@@ -182,7 +182,7 @@ async def shellrunner(_, message: Message):
             )
             stdout, stderr = process.communicate()
             output = stdout.decode() + stderr.decode()
-        except Exception as err:
+        except Exception:
             exc_type, exc_obj, exc_tb = sys.exc_info()
             errors = traceback.format_exception(
                 etype=exc_type,

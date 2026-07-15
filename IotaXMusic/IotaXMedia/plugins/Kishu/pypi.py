@@ -1,5 +1,5 @@
-﻿# Authored By Iota Coders © 2025
-from pyrogram import Client, filters
+# Authored By Iota Coders © 2025
+from pyrogram import filters
 from pyrogram.enums import ParseMode
 import requests
 from IotaXMedia import app

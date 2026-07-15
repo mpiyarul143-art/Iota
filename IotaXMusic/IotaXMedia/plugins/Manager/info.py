@@ -1,6 +1,6 @@
-﻿# Authored By Iota Coders © 2025
+# Authored By Iota Coders © 2025
 import asyncio
-from pyrogram import filters, enums, types
+from pyrogram import filters, enums
 from pyrogram.errors import PeerIdInvalid, RPCError, FloodWait
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 

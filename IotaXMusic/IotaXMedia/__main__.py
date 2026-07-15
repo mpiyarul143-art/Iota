@@ -1,4 +1,4 @@
-﻿# Authored By Iota Coders © 2025
+# Authored By Iota Coders © 2025
 import asyncio
 import importlib
 
@@ -45,7 +45,7 @@ async def init():
         users = await get_banned_users()
         for user_id in users:
             BANNED_USERS.add(user_id)
-    except:
+    except Exception:
         pass
 
     await app.start()
@@ -64,7 +64,7 @@ async def init():
             "ᴘʟᴇᴀsᴇ ᴛᴜʀɴ ᴏɴ ᴛʜᴇ ᴠᴏɪᴄᴇ ᴄʜᴀᴛ ᴏғ ʏᴏᴜʀ ʟᴏɢ ɢʀᴏᴜᴘ/ᴄʜᴀɴɴᴇʟ.\n\nɪᴏᴛᴀ ʙᴏᴛ sᴛᴏᴘᴘᴇᴅ..."
         )
         exit()
-    except:
+    except Exception:
         pass
 
     await StreamController.decorators()

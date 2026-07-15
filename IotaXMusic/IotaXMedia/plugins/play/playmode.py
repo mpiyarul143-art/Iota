@@ -1,4 +1,4 @@
-﻿# Authored By Iota Coders © 2025
+# Authored By Iota Coders © 2025
 from pyrogram import filters
 from pyrogram.types import InlineKeyboardMarkup, Message
 
@@ -30,7 +30,7 @@ async def playmode_(client, message: Message, _):
     else:
         Playtype = True
     buttons = playmode_users_markup(_, Direct, Group, Playtype)
-    response = await message.reply_text(
+    await message.reply_text(
         _["play_22"].format(message.chat.title),
         reply_markup=InlineKeyboardMarkup(buttons),
     )

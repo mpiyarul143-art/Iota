@@ -1,4 +1,4 @@
-﻿# Authored By Iota Coders © 2025
+# Authored By Iota Coders © 2025
 import csv
 from io import StringIO, BytesIO
 from pyrogram import filters

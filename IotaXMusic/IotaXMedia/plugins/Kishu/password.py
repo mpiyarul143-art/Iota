@@ -1,6 +1,6 @@
-﻿# Authored By Iota Coders © 2025
+# Authored By Iota Coders © 2025
 import random
-from pyrogram import Client, filters, enums
+from pyrogram import filters, enums
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from IotaXMedia import app
 from config import BOT_USERNAME

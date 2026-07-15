@@ -1,4 +1,4 @@
-﻿# Authored By Iota Coders © 2025
+# Authored By Iota Coders © 2025
 """
 -------------------------------------------------------------------------
 Mass/group administration commands with owner‑only confirmation:
