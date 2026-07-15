@@ -5,11 +5,17 @@ from IotaXMedia import app
 
 TOTAL_SECTIONS = 29
 
+# Help sections that list owner/sudo-only features (marked "[Only for Sudoers]").
+# These buttons are hidden from normal users and only shown to sudoers/owner.
+RESTRICTED_HELP_SECTIONS = {4, 5, 8, 9, 14}
 
-def generate_help_buttons(_, start: int, end: int, current_page: int):
+
+def generate_help_buttons(_, start: int, end: int, current_page: int, is_authorized: bool = False):
     """Create a grid of three buttons per row for the given range."""
     buttons, per_row = [], 3
     for idx, i in enumerate(range(start, end + 1)):
+        if i in RESTRICTED_HELP_SECTIONS and not is_authorized:
+            continue
         if idx % per_row == 0:
             buttons.append([])
         buttons[-1].append(
@@ -21,8 +27,8 @@ def generate_help_buttons(_, start: int, end: int, current_page: int):
     return buttons
 
 
-def first_page(_):
-    buttons = generate_help_buttons(_, 1, 15, current_page=1)
+def first_page(_, is_authorized: bool = False):
+    buttons = generate_help_buttons(_, 1, 15, current_page=1, is_authorized=is_authorized)
     buttons.append(
         [
             InlineKeyboardButton(text="๏ ᴍᴇɴᴜ ๏", callback_data="back_to_main"),
@@ -32,8 +38,8 @@ def first_page(_):
     return InlineKeyboardMarkup(buttons)
 
 
-def second_page(_):
-    buttons = generate_help_buttons(_, 16, TOTAL_SECTIONS, current_page=2)
+def second_page(_, is_authorized: bool = False):
+    buttons = generate_help_buttons(_, 16, TOTAL_SECTIONS, current_page=2, is_authorized=is_authorized)
     buttons.append(
         [
             InlineKeyboardButton(text="๏ ʙᴀᴄᴋ ๏", callback_data="help_prev_1"),

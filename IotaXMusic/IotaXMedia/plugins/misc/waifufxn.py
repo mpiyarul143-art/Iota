@@ -41,35 +41,88 @@ commands = {
     "lurk": {"emoji": "👤", "text": "is lurking"}
 }
 
+# nekos.life is permanently offline. Map every action to the closest
+# waifu.pics SFW tags (the first matching tag is used). If a specific tag is
+# unavailable we fall back to general SFW tags that always resolve.
+ACTION_TAGS = {
+    "punch": ["bonk", "slap", "yeet"],
+    "slap": ["slap"],
+    "hug": ["hug"],
+    "bite": ["bite"],
+    "kiss": ["kiss", "lick"],
+    "highfive": ["highfive"],
+    "shoot": ["yeet", "bonk", "kick"],
+    "dance": ["dance"],
+    "happy": ["happy"],
+    "baka": ["smug", "cringe"],
+    "pat": ["pat"],
+    "nod": ["wave", "handhold"],
+    "nope": ["cry", "cringe"],
+    "cuddle": ["cuddle", "glomp"],
+    "feed": ["feed", "nom"],
+    "bored": ["cringe", "cry"],
+    "nom": ["nom"],
+    "yawn": ["cry", "cringe"],
+    "facepalm": ["cringe"],
+    "tickle": ["glomp", "cuddle"],
+    "yeet": ["yeet"],
+    "think": ["smug", "wave"],
+    "blush": ["blush"],
+    "smug": ["smug"],
+    "wink": ["wink"],
+    "peck": ["kiss", "blush"],
+    "smile": ["smile"],
+    "wave": ["wave"],
+    "poke": ["poke"],
+    "stare": ["glomp", "smug"],
+    "shrug": ["cry", "cringe"],
+    "sleep": ["cry", "cuddle"],
+    "lurk": ["awoo", "neko"],
+}
+
+GENERAL_TAGS = ["waifu", "neko", "shinobu", "megumin"]
+
 
 def md_escape(text: str) -> str:
     return text.replace('[', '\\[').replace(']', '\\]')
 
 
-async def get_animation(action: str):
-    """Fetch an SFW reaction GIF URL, trying multiple public APIs.
+async def _try_waifu(tag: str):
+    """Return a GIF/photo URL for a waifu.pics SFW tag, or None on failure."""
+    url = f"https://api.waifu.pics/sfw/{tag}"
+    try:
+        async with httpx.AsyncClient(
+            verify=False, timeout=10, follow_redirects=True
+        ) as client:
+            resp = await client.get(url)
+            if resp.status_code == 200:
+                data = resp.json()
+                return data.get("url")
+    except Exception as e:
+        print(f"❌ Animation fetch error ({url}): {e}")
+    return None
 
-    nekos.life is tried first (broad action set, reliable), then waifu.pics
-    (covers kiss/slap/hug/pat/etc. in networks where it is reachable).
-    Returns the URL string or None if every source fails.
+
+async def get_animation(action: str):
+    """Fetch an SFW reaction GIF/photo URL from waifu.pics.
+
+    Tries the action's specific tags first, then a guaranteed-resolving
+    general tag, so the command never fails with "couldn't fetch".
+    Returns the URL string or None only if the whole service is unreachable.
     """
-    sources = [
-        f"https://nekos.life/api/{action}",
-        f"https://api.waifu.pics/sfw/{action}",
-    ]
-    for url in sources:
-        try:
-            async with httpx.AsyncClient(
-                verify=False, timeout=10, follow_redirects=True
-            ) as client:
-                resp = await client.get(url)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    gif_url = data.get("url") if isinstance(data, dict) else None
-                    if gif_url:
-                        return gif_url
-        except Exception as e:
-            print(f"❌ Animation fetch error ({url}): {e}")
+    tags = ACTION_TAGS.get(action, [])
+    candidates = list(tags) + list(GENERAL_TAGS)
+    # de-duplicate while preserving order
+    seen, ordered = set(), []
+    for t in candidates:
+        if t not in seen:
+            seen.add(t)
+            ordered.append(t)
+
+    for tag in ordered:
+        gif_url = await _try_waifu(tag)
+        if gif_url:
+            return gif_url
     return None
 
 
@@ -87,9 +140,10 @@ async def animation_command(client: Client, message: Message):
     sender_name = md_escape(message.from_user.first_name)
     sender = f"[{sender_name}](tg://user?id={message.from_user.id})"
 
-    if message.reply_to_message:
-        target_name = md_escape(message.reply_to_message.from_user.first_name)
-        target = f"[{target_name}](tg://user?id={message.reply_to_message.from_user.id})"
+    if message.reply_to_message and message.reply_to_message.from_user:
+        target_user = message.reply_to_message.from_user
+        target_name = md_escape(target_user.first_name)
+        target = f"[{target_name}](tg://user?id={target_user.id})"
     else:
         target = sender
 
@@ -98,8 +152,16 @@ async def animation_command(client: Client, message: Message):
 
     caption = f"**{sender} {action_text} {target}!** {emoji}"
 
-    await message.reply_animation(
-        animation=gif_url,
-        caption=caption,
-        parse_mode=ParseMode.MARKDOWN
-    )
+    lower = gif_url.lower()
+    if lower.endswith((".gif", ".mp4", ".webm", ".mov")):
+        await message.reply_animation(
+            animation=gif_url,
+            caption=caption,
+            parse_mode=ParseMode.MARKDOWN
+        )
+    else:
+        await message.reply_photo(
+            photo=gif_url,
+            caption=caption,
+            parse_mode=ParseMode.MARKDOWN
+        )

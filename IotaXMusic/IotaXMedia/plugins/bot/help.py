@@ -6,6 +6,7 @@ from pyrogram import Client, filters, types
 from pyrogram.types import InlineKeyboardMarkup, Message
 
 from IotaXMedia import app
+from IotaXMedia.misc import SUDOERS
 from IotaXMedia.utils.database import get_lang
 from IotaXMedia.utils.decorators.language import LanguageStart, languageCB
 from IotaXMedia.utils.inline.help import (
@@ -19,6 +20,11 @@ from IotaXMedia.utils.inline.start import private_panel
 from config import BANNED_USERS, HELP_IMG_URL, SUPPORT_CHAT
 from strings import get_string, helpers
 
+
+def _is_authorized(user_id: int) -> bool:
+    """Owner / sudoers see the restricted (owner-only) help sections."""
+    return bool(user_id in SUDOERS)
+
 # ────────────────────────────────────────────────  /help entrypoints ──
 
 @app.on_message(filters.command(["help"]) & filters.private & ~BANNED_USERS)
@@ -29,7 +35,8 @@ async def helper_private(client: Client, update: Union[Message, types.CallbackQu
     language = await get_lang(update.from_user.id)
     _ = get_string(language)
 
-    keyboard = first_page(_)
+    is_authorized = _is_authorized(update.from_user.id)
+    keyboard = first_page(_, is_authorized)
     caption = _["help_1"].format(SUPPORT_CHAT)
 
     if is_cb:
@@ -93,9 +100,10 @@ async def helper_cb(client: Client, CallbackQuery: types.CallbackQuery, _):
 @languageCB
 async def help_next_cb(client: Client, CallbackQuery: types.CallbackQuery, _):
     if CallbackQuery.data == "help_next_2":
+        is_authorized = _is_authorized(CallbackQuery.from_user.id)
         await CallbackQuery.edit_message_text(
             _["help_1"].format(SUPPORT_CHAT),
-            reply_markup=second_page(_),
+            reply_markup=second_page(_, is_authorized),
             disable_web_page_preview=True
         )
     else:
@@ -117,10 +125,11 @@ async def help_prev_cb(client: Client, CallbackQuery: types.CallbackQuery, _):
 @languageCB
 async def help_back_cb(client: Client, CallbackQuery: types.CallbackQuery, _):
     page = CallbackQuery.data.split("_")[-1]
+    is_authorized = _is_authorized(CallbackQuery.from_user.id)
     if page == "1":
-        keyboard = first_page(_)
+        keyboard = first_page(_, is_authorized)
     elif page == "2":
-        keyboard = second_page(_)
+        keyboard = second_page(_, is_authorized)
     else:
         return await CallbackQuery.answer("Invalid page.", show_alert=True)
 
