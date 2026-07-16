@@ -7,7 +7,7 @@ This is the same system the IotaXMusic bot uses, ported from Pyrogram to
 python-telegram-bot.
 
 Usage:
-    /q            → quote the replied message (WEBP sticker)
+    /q            → quote the replied message (Telegram quote sticker)
     /q r          → also render the reply-context bubble above the quote
     /q 3          → count arg (1-10) — reserved; Bot API can't fetch threads
     /q <color>    → custom background: a hex (#1b1429) or 'random'
@@ -26,7 +26,7 @@ import aiohttp
 from telegram import Update
 from telegram.ext import ContextTypes
 
-from utils.telegram_safe import chat_action, ACTION_CHOOSE_STICKER
+from utils.telegram_safe import chat_action, send_action, ACTION_TYPING, ACTION_CHOOSE_STICKER
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +101,17 @@ def _sender_name(m) -> str:
     return "Someone"
 
 
+def _chat_type(m) -> str:
+    """Chat type string the quotly API expects ('private' / 'group' /
+    'supergroup' / 'channel'). Mirrors how IotaXMusic builds the payload —
+    omitting it yields worse renders, so we derive it from the message."""
+    chat = getattr(m, "chat", None)
+    t = getattr(chat, "type", None)
+    if t is None:
+        return "private"
+    return str(t).lower()
+
+
 def _sender_username(m) -> str:
     u = getattr(m, "from_user", None)
     if u and u.username:
@@ -172,7 +183,7 @@ async def _build_payload(context, messages, include_reply: bool,
                          background: str) -> dict:
     payload = {
         "type": "quote",
-        "format": "webp",
+        "format": "png",
         "backgroundColor": background or _BACKGROUND,
         "messages": [],
     }
@@ -181,11 +192,13 @@ async def _build_payload(context, messages, include_reply: bool,
         photo = {"url": avatar_url} if avatar_url else {}
         entry = {
             "entities": _entities_to_payload(m),
+            "chatId": _sender_id(m),
             "avatar": True,
             "from": {
                 "id": _sender_id(m),
                 "name": _sender_name(m),
                 "username": _sender_username(m),
+                "type": _chat_type(m),
                 "photo": photo,
             },
             "text": _text_or_caption(m),
@@ -324,11 +337,12 @@ async def quote_sticker_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     thread_id = getattr(msg, "message_thread_id", None)
 
+    # 🔹 While the quote is being generated we show a plain "typing…" action
+    # (the bot is composing the image). The "choosing sticker…" action is
+    # reserved for the instant the sticker is actually sent as a reply (see
+    # _send_quote) — using it for the whole render was misleading.
     try:
-        # 🔴 "Iota is choosing a sticker…" indicator — shows in BOTH DMs and
-        # groups for the whole render (chat_action re-sends it every few
-        # seconds since Telegram actions expire after ~5s).
-        async with chat_action(context.bot, chat_id, ACTION_CHOOSE_STICKER,
+        async with chat_action(context.bot, chat_id, ACTION_TYPING,
                                message_thread_id=thread_id):
             img = await _render_quote(context, [reply], include_reply,
                                       background or _BACKGROUND)
@@ -341,17 +355,21 @@ async def quote_sticker_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _safe_reply(msg, "❌ Abhi quote nahi ban paaya, thodi der baad try karo 🥺")
         return
 
-    # ── Deliver the quote. Telegram is picky about what counts as a valid
-    # sticker webp, so if reply_sticker is rejected we transparently fall
-    # back to sending the SAME image as a photo, then as a document. The
-    # user always gets their quote — /q never dead-ends on "Kuch gadbad". ──
-    sent = await _send_quote(msg, img)
-    if not sent:
-        await _safe_reply(
-            msg,
-            "❌ Quote ban gaya par yahan bhej nahi paayi — "
-            "shayad mujhe media bhejne ki permission nahi hai 🥺",
-        )
+    # ── Deliver the quote. Prefer a real sticker; if Telegram rejects it
+    # (pickier about sticker format than photo), transparently fall back to
+    # a photo, then a document. The user always gets their quote. ──
+    reason = await _send_quote(context.bot, msg, img, thread_id)
+    if reason is not None:
+        if reason == "forbidden":
+            await _safe_reply(
+                msg,
+                "❌ Quote ban gaya par yahan bhej nahi paayi — "
+                "shayad mujhe media bhejne ki permission nahi hai 🥺",
+            )
+        else:
+            await _safe_reply(
+                msg, "❌ Quote ban gaya par bhej nahi paayi, thodi der baad try karo 🥺",
+            )
 
 
 def _fresh_bio(img: bytes, name: str) -> BytesIO:
@@ -362,54 +380,56 @@ def _fresh_bio(img: bytes, name: str) -> BytesIO:
     return bio
 
 
-async def _send_quote(msg, img: bytes) -> bool:
-    """Try sticker → photo → document. Returns True on the first success.
-    Every attempt is isolated so one Telegram rejection can't abort the rest.
-    Permission errors (Forbidden) short-circuit since retrying won't help."""
+async def _send_quote(bot, msg, img: bytes, thread_id) -> "str | None":
+    """Try sticker → photo → document. Returns None on success, or a short
+    reason string ("forbidden" / "error") if every attempt failed.
+
+    The "choosing sticker…" chat action is fired only here, right before the
+    actual sticker send — that is what the action literally means (the bot is
+    picking a sticker to send), so it now shows exactly when a sticker is
+    about to be delivered."""
     reply_kwargs = {
         "reply_to_message_id": msg.message_id,
         "allow_sending_without_reply": True,
     }
+    forbidden = False
 
     # 1) Native sticker (the ideal result).
     try:
+        await send_action(bot, msg.chat_id, ACTION_CHOOSE_STICKER,
+                          message_thread_id=thread_id)
         await msg.reply_sticker(
             _fresh_bio(img, "quote.webp"),
             emoji=_QUOTE_EMOJI,
             **reply_kwargs,
         )
-        return True
+        return None
     except Exception as e:
         emsg = str(e).lower()
         if "forbidden" in emsg or "not enough rights" in emsg or "chat write" in emsg:
-            logger.warning(f"/q sticker send forbidden: {e}")
-            return False
-        logger.warning(f"/q reply_sticker rejected, falling back to photo: {e}")
+            forbidden = True
+        else:
+            logger.warning(f"/q reply_sticker rejected, falling back to photo: {e}")
 
-    # 2) Photo (Telegram accepts the webp as a photo far more leniently).
+    # 2) Photo (Telegram accepts the PNG far more leniently as a photo).
     try:
-        await msg.reply_photo(
-            _fresh_bio(img, "quote.webp"),
-            **reply_kwargs,
-        )
-        return True
+        await msg.reply_photo(_fresh_bio(img, "quote.png"), **reply_kwargs)
+        return None
     except Exception as e:
         emsg = str(e).lower()
         if "forbidden" in emsg or "not enough rights" in emsg or "chat write" in emsg:
-            logger.warning(f"/q photo send forbidden: {e}")
-            return False
-        logger.warning(f"/q reply_photo rejected, falling back to document: {e}")
+            forbidden = True
+        else:
+            logger.warning(f"/q reply_photo rejected, falling back to document: {e}")
 
     # 3) Document (last resort — near-universally accepted).
     try:
-        await msg.reply_document(
-            _fresh_bio(img, "quote.webp"),
-            **reply_kwargs,
-        )
-        return True
+        await msg.reply_document(_fresh_bio(img, "quote.png"), **reply_kwargs)
+        return None
     except Exception as e:
         logger.warning(f"/q reply_document also failed: {e}")
-        return False
+
+    return "forbidden" if forbidden else "error"
 
 
 async def _safe_reply(msg, text: str):
