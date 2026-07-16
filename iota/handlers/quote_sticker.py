@@ -1,20 +1,25 @@
 """
-Iota Bot — /q (Quote Sticker) — ported from the IotaXMusic quotly system.
+Iota Bot — /q (Quote Sticker)
+=============================
 
-Reply to a message with /q to turn it into a real Telegram-style quote
-sticker, rendered by an external "quotly" quote-API (LyoSU-compatible).
-This is the same system the IotaXMusic bot uses, ported from Pyrogram to
-python-telegram-bot.
+Ported faithfully from the IotaXMusic ``/q`` (quotly) system, but adapted from
+Pyrogram/MTProto to python-telegram-bot (Bot API). Reply to a message with /q
+to turn it into a Telegram-style quote image.
 
-Usage:
-    /q            → quote the replied message (Telegram quote sticker)
-    /q r          → also render the reply-context bubble above the quote
-    /q 3          → count arg (1-10) — reserved; Bot API can't fetch threads
-    /q <color>    → custom background: a hex (#1b1429) or 'random'
-    /q r random   → flags can be combined in any order
+How it works
+------------
+1. Build a quotly ``quote`` payload from the replied message (text, sender,
+   entities, optional reply-context bubble) — identical shape to IotaXMusic.
+2. POST it to the external quotly API (LyoSU-compatible). It returns a PNG
+   image (Telegram stickers are PNG-based; the ``.webp`` name is just the
+   conventional extension).
+3. Send it back. We try a real ``sticker`` first (the IotaXMusic look); if
+   Bot API rejects the raw upload, we transparently fall back to a ``photo``,
+   which Bot API accepts far more leniently. The user always gets the quote.
 
-Everything degrades gracefully: if every quote endpoint is down, the user
-gets a short in-character error instead of a crash. Never raises.
+Everything degrades gracefully: if every quote endpoint is down, or the bot
+cannot send media in that chat, the user gets a short in-character error
+instead of a crash. Never raises. No chat actions are used.
 """
 import base64
 import logging
@@ -26,13 +31,10 @@ import aiohttp
 from telegram import Update
 from telegram.ext import ContextTypes
 
-from utils.telegram_safe import chat_action, send_action, ACTION_TYPING, ACTION_CHOOSE_STICKER
-
 logger = logging.getLogger(__name__)
 
-# Quote-API endpoints tried in order (LyoSU-compatible). If one is down or
-# rate-limited, the next is attempted — same resilient list the IotaXMusic
-# bot uses so /q keeps working across networks.
+# Quote-API endpoints tried in order (LyoSU-compatible, same resilient list
+# the IotaXMusic bot uses so /q keeps working across networks).
 _QUOTE_ENDPOINTS = (
     "https://shnwazdev-quoteapi.vercel.app/generate.png",
     "https://bot.lyo.su/quote/generate.png",
@@ -40,8 +42,7 @@ _QUOTE_ENDPOINTS = (
 )
 
 _BACKGROUND = "#1b1429"
-_MAX_THREAD = 10
-_QUOTE_EMOJI = "💜"  # emoji tag attached to the sticker (like the quote-bot)
+_QUOTE_EMOJI = "💜"
 _HEADERS = {
     "Accept-Language": "en-US",
     "User-Agent": (
@@ -56,32 +57,10 @@ class QuotlyError(Exception):
     """Raised when no quote endpoint could produce an image."""
 
 
-def _looks_like_image(b: bytes) -> bool:
-    """True if `b` starts with the magic bytes of a format Telegram accepts
-    (WEBP / PNG / JPEG / GIF). The quote endpoints occasionally answer HTTP
-    200 with an HTML or JSON *error* page; sending those bytes to
-    reply_sticker/reply_photo makes Telegram reject the file. Validating up
-    front lets us fall through to the next endpoint instead of crashing."""
-    if not b or len(b) < 12:
-        return False
-    if b[:4] == b"RIFF" and b[8:12] == b"WEBP":   # WEBP
-        return True
-    if b[:8] == b"\x89PNG\r\n\x1a\n":              # PNG
-        return True
-    if b[:3] == b"\xff\xd8\xff":                   # JPEG
-        return True
-    if b[:6] in (b"GIF87a", b"GIF89a"):            # GIF
-        return True
-    return False
-
-
-# ── Telegram-message → quotly field extractors ────────────────────────────
+# ── Telegram-message → quotly field extractors ──────────────────────────────
 
 def _sender_id(m) -> int:
-    """Best-effort stable ID for the message author (user or channel)."""
     if getattr(m, "forward_origin", None):
-        # Forwarded: keep it simple and attribute to the forwarder if known,
-        # else use a constant so the API still renders a card.
         u = getattr(m, "from_user", None)
         return u.id if u else 1
     if getattr(m, "from_user", None):
@@ -101,17 +80,6 @@ def _sender_name(m) -> str:
     return "Someone"
 
 
-def _chat_type(m) -> str:
-    """Chat type string the quotly API expects ('private' / 'group' /
-    'supergroup' / 'channel'). Mirrors how IotaXMusic builds the payload —
-    omitting it yields worse renders, so we derive it from the message."""
-    chat = getattr(m, "chat", None)
-    t = getattr(chat, "type", None)
-    if t is None:
-        return "private"
-    return str(t).lower()
-
-
 def _sender_username(m) -> str:
     u = getattr(m, "from_user", None)
     if u and u.username:
@@ -120,6 +88,16 @@ def _sender_username(m) -> str:
     if sc and getattr(sc, "username", None):
         return sc.username
     return ""
+
+
+def _chat_type(m) -> str:
+    """Chat type string the quotly API expects ('private' / 'group' /
+    'supergroup' / 'channel')."""
+    chat = getattr(m, "chat", None)
+    t = getattr(chat, "type", None)
+    if t is None:
+        return "private"
+    return str(t).lower()
 
 
 def _text_or_caption(m) -> str:
@@ -141,7 +119,6 @@ def _entities_to_payload(m) -> list:
             "offset": e.offset,
             "length": e.length,
         }
-        # Preserve custom-emoji ids so premium emoji show up.
         cid = getattr(e, "custom_emoji_id", None)
         if cid:
             item["custom_emoji_id"] = cid
@@ -151,7 +128,7 @@ def _entities_to_payload(m) -> list:
 
 async def _avatar_data_url(context, m) -> str:
     """Download the sender's profile photo through the bot and return it as a
-    base64 data URL, which the quote-API accepts via `photo.url`. Telegram
+    base64 data URL (the quotly API accepts this via ``photo.url``). Telegram
     file_ids are NOT resolvable by the remote API, so this is what actually
     makes the avatar render. Returns "" on any failure (card still renders,
     just without a photo)."""
@@ -218,7 +195,7 @@ async def _build_payload(context, messages, include_reply: bool,
 
 async def _render_quote(context, messages, include_reply: bool,
                         background: str = _BACKGROUND) -> bytes:
-    """POST the payload to each endpoint until one returns an image.
+    """POST the payload to each endpoint until one returns a real image.
     Returns raw image bytes. Raises QuotlyError if all endpoints fail."""
     payload = await _build_payload(context, messages, include_reply, background)
     last_err = "all quote endpoints failed"
@@ -231,7 +208,6 @@ async def _render_quote(context, messages, include_reply: bool,
                         last_err = f"HTTP {r.status} from {url}"
                         continue
                     ctype = r.headers.get("content-type", "")
-                    # JSON response → base64 image in result.image / image.
                     if "application/json" in ctype or body[:1] == b"{":
                         try:
                             data = await r.json(content_type=None)
@@ -246,40 +222,121 @@ async def _render_quote(context, messages, include_reply: bool,
                             last_err = f"no image field from {url}"
                             continue
                         try:
-                            raw = base64.b64decode(img_b64)
+                            return base64.b64decode(img_b64)
                         except Exception:
                             last_err = f"bad base64 from {url}"
                             continue
-                        if not _looks_like_image(raw):
-                            last_err = f"decoded bytes not an image from {url}"
-                            continue
-                        return raw
-                    # Otherwise treat the body as a raw image — but only if it
-                    # actually looks like one (some endpoints return an HTML /
-                    # JSON error page with HTTP 200).
-                    if _looks_like_image(body):
+                    if body:
                         return body
-                    last_err = (
-                        f"non-image body from {url} "
-                        f"(status 200, {len(body)} bytes, "
-                        f"starts {body[:16]!r})"
-                    )
+                    last_err = f"empty body from {url}"
             except Exception as e:
                 last_err = f"{type(e).__name__}: {e} ({url})"
     raise QuotlyError(last_err)
 
 
-_HEX_RE = re.compile(r"^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$")
-_KNOWN_COLOR_NAMES = {
-    "white", "black", "red", "green", "blue", "yellow", "orange", "purple",
-    "pink", "gray", "grey", "cyan", "magenta", "brown", "teal", "navy",
-    "maroon", "olive", "lime", "aqua", "silver", "gold", "violet", "indigo",
-}
+def _looks_like_image(b: bytes) -> bool:
+    """True if `b` starts with the magic bytes of a format Telegram accepts
+    (WEBP / PNG / JPEG). The endpoints occasionally answer HTTP 200 with an
+    HTML/JSON error page; rejecting those avoids sending junk."""
+    if not b or len(b) < 12:
+        return False
+    if b[:4] == b"RIFF" and b[8:12] == b"WEBP":
+        return True
+    if b[:8] == b"\x89PNG\r\n\x1a\n":
+        return True
+    if b[:3] == b"\xff\xd8\xff":
+        return True
+    return False
 
 
-def _random_hex() -> str:
-    return "#{:06x}".format(random.randint(0, 0xFFFFFF))
+def _fresh_bio(img: bytes, name: str) -> BytesIO:
+    """A brand-new BytesIO per send attempt (a consumed stream can't be
+    re-read, so each fallback needs its own)."""
+    bio = BytesIO(img)
+    bio.name = name
+    return bio
 
+
+async def _send_quote(msg, img: bytes) -> None:
+    """Deliver the quote. Prefer a real sticker (the IotaXMusic look); if
+    Bot API rejects the raw upload (it is stricter than Pyrogram/MTProto),
+    transparently fall back to a photo — Bot API accepts photos far more
+    leniently, and the quote looks the same to the user. No chat actions."""
+    reply_kwargs = {
+        "reply_to_message_id": msg.message_id,
+        "allow_sending_without_reply": True,
+    }
+    # 1) Sticker — matches IotaXMusic's native look.
+    try:
+        await msg.reply_sticker(
+            _fresh_bio(img, "quote.webp"),
+            emoji=_QUOTE_EMOJI,
+            **reply_kwargs,
+        )
+        return
+    except Exception as e:
+        logger.warning(f"/q reply_sticker rejected, falling back to photo: {e}")
+    # 2) Photo — reliable delivery path under Bot API.
+    try:
+        await msg.reply_photo(_fresh_bio(img, "quote.png"), **reply_kwargs)
+        return
+    except Exception as e:
+        logger.warning(f"/q reply_photo also failed: {e}")
+        raise
+
+
+async def quote_sticker_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    reply = msg.reply_to_message
+    if not reply:
+        await msg.reply_text(
+            "❌ Reply to a message with /q to turn it into a quote sticker!"
+        )
+        return
+
+    include_reply, count, background = _parse_args(context.args)
+    if count < 1 or count > 10:
+        await msg.reply_text("❌ Range 1-10 rakho.")
+        return
+
+    if not _text_or_caption(reply).strip():
+        await msg.reply_text(
+            "❌ Reply to a text message (a caption also works) to quote it."
+        )
+        return
+
+    try:
+        img = await _render_quote(context, [reply], include_reply,
+                                  background or _BACKGROUND)
+    except QuotlyError as e:
+        logger.warning(f"/q failed (all endpoints): {e}")
+        await _safe_reply(msg, "❌ Abhi quote nahi ban paaya, thodi der baad try karo 🥺")
+        return
+    except Exception as e:
+        logger.exception(f"/q render error: {e}")
+        await _safe_reply(msg, "❌ Abhi quote nahi ban paaya, thodi der baad try karo 🥺")
+        return
+
+    try:
+        await _send_quote(msg, img)
+    except Exception as e:
+        logger.exception(f"/q send failed: {e}")
+        await _safe_reply(
+            msg, "❌ Quote ban gaya par yahan bhej nahi paayi 🥺 "
+                 "(shayad media bhejne ki permission nahi hai)",
+        )
+
+
+async def _safe_reply(msg, text: str):
+    """Send a plain-text reply, swallowing any send error (used on the error
+    paths so a failed error-notice can't crash the handler)."""
+    try:
+        await msg.reply_text(text)
+    except Exception as e:
+        logger.debug(f"/q error-reply failed: {e}")
+
+
+# ── Argument parsing ────────────────────────────────────────────────────────
 
 def _parse_args(args) -> tuple[bool, int, str]:
     """Parse `/q [r] [N] [color]` → (include_reply, count, background).
@@ -313,129 +370,13 @@ def _parse_args(args) -> tuple[bool, int, str]:
     return include_reply, count, background
 
 
-async def quote_sticker_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = update.effective_message
-    reply = msg.reply_to_message
-    if not reply:
-        await msg.reply_text(
-            "❌ Reply to a message with /q to turn it into a quote sticker!"
-        )
-        return
-
-    include_reply, count, background = _parse_args(context.args)
-    if count < 1 or count > _MAX_THREAD:
-        await msg.reply_text(f"❌ Range 1-{_MAX_THREAD} rakho.")
-        return
-
-    # Must have some text/caption to quote.
-    if not _text_or_caption(reply).strip():
-        await msg.reply_text(
-            "❌ Reply to a text message (a caption also works) to quote it."
-        )
-        return
-
-    chat_id = update.effective_chat.id
-    thread_id = getattr(msg, "message_thread_id", None)
-
-    # 🔹 While the quote is being generated we show a plain "typing…" action
-    # (the bot is composing the image). The "choosing sticker…" action is
-    # reserved for the instant the sticker is actually sent as a reply (see
-    # _send_quote) — using it for the whole render was misleading.
-    try:
-        async with chat_action(context.bot, chat_id, ACTION_TYPING,
-                               message_thread_id=thread_id):
-            img = await _render_quote(context, [reply], include_reply,
-                                      background or _BACKGROUND)
-    except QuotlyError as e:
-        logger.warning(f"/q failed (all endpoints): {e}")
-        await _safe_reply(msg, "❌ Abhi quote nahi ban paaya, thodi der baad try karo 🥺")
-        return
-    except Exception as e:
-        logger.exception(f"/q render error: {e}")
-        await _safe_reply(msg, "❌ Abhi quote nahi ban paaya, thodi der baad try karo 🥺")
-        return
-
-    # ── Deliver the quote. Prefer a real sticker; if Telegram rejects it
-    # (pickier about sticker format than photo), transparently fall back to
-    # a photo, then a document. The user always gets their quote. ──
-    reason = await _send_quote(context.bot, msg, img, thread_id)
-    if reason is not None:
-        if reason == "forbidden":
-            await _safe_reply(
-                msg,
-                "❌ Quote ban gaya par yahan bhej nahi paayi — "
-                "shayad mujhe media bhejne ki permission nahi hai 🥺",
-            )
-        else:
-            await _safe_reply(
-                msg, "❌ Quote ban gaya par bhej nahi paayi, thodi der baad try karo 🥺",
-            )
+_HEX_RE = re.compile(r"^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$")
+_KNOWN_COLOR_NAMES = {
+    "white", "black", "red", "green", "blue", "yellow", "orange", "purple",
+    "pink", "gray", "grey", "cyan", "magenta", "brown", "teal", "navy",
+    "maroon", "olive", "lime", "aqua", "silver", "gold", "violet", "indigo",
+}
 
 
-def _fresh_bio(img: bytes, name: str) -> BytesIO:
-    """A brand-new BytesIO per send attempt (a consumed stream can't be
-    re-read, so each fallback needs its own)."""
-    bio = BytesIO(img)
-    bio.name = name
-    return bio
-
-
-async def _send_quote(bot, msg, img: bytes, thread_id) -> "str | None":
-    """Try sticker → photo → document. Returns None on success, or a short
-    reason string ("forbidden" / "error") if every attempt failed.
-
-    The "choosing sticker…" chat action is fired only here, right before the
-    actual sticker send — that is what the action literally means (the bot is
-    picking a sticker to send), so it now shows exactly when a sticker is
-    about to be delivered."""
-    reply_kwargs = {
-        "reply_to_message_id": msg.message_id,
-        "allow_sending_without_reply": True,
-    }
-    forbidden = False
-
-    # 1) Native sticker (the ideal result).
-    try:
-        await send_action(bot, msg.chat_id, ACTION_CHOOSE_STICKER,
-                          message_thread_id=thread_id)
-        await msg.reply_sticker(
-            _fresh_bio(img, "quote.webp"),
-            emoji=_QUOTE_EMOJI,
-            **reply_kwargs,
-        )
-        return None
-    except Exception as e:
-        emsg = str(e).lower()
-        if "forbidden" in emsg or "not enough rights" in emsg or "chat write" in emsg:
-            forbidden = True
-        else:
-            logger.warning(f"/q reply_sticker rejected, falling back to photo: {e}")
-
-    # 2) Photo (Telegram accepts the PNG far more leniently as a photo).
-    try:
-        await msg.reply_photo(_fresh_bio(img, "quote.png"), **reply_kwargs)
-        return None
-    except Exception as e:
-        emsg = str(e).lower()
-        if "forbidden" in emsg or "not enough rights" in emsg or "chat write" in emsg:
-            forbidden = True
-        else:
-            logger.warning(f"/q reply_photo rejected, falling back to document: {e}")
-
-    # 3) Document (last resort — near-universally accepted).
-    try:
-        await msg.reply_document(_fresh_bio(img, "quote.png"), **reply_kwargs)
-        return None
-    except Exception as e:
-        logger.warning(f"/q reply_document also failed: {e}")
-
-    return "forbidden" if forbidden else "error"
-
-
-async def _safe_reply(msg, text: str):
-    """Send a plain-text reply, swallowing any send error (used on the error
-    paths so a failed error-notice can't crash the handler)."""
-    try:
-        await msg.reply_text(text)
-    except Exception as e:
-        logger.debug(f"/q error-reply failed: {e}")
+def _random_hex() -> str:
+    return "#{:06x}".format(random.randint(0, 0xFFFFFF))
