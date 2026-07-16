@@ -153,15 +153,24 @@ async def chat_action(bot, chat_id, action=ACTION_TYPING, *,
     """
     stop = asyncio.Event()
 
+    # 🔴 Fire the FIRST action synchronously (awaited) BEFORE yielding so the
+    # indicator is guaranteed to appear even when the wrapped work finishes in
+    # well under `interval` seconds. Previously the first action was only
+    # scheduled inside the background task and could be skipped entirely for
+    # fast work (e.g. a quick quote render) — making it look like the
+    # indicator "never worked". send_action already swallows all errors.
+    await send_action(bot, chat_id, action, message_thread_id=message_thread_id)
+
     async def _pump():
-        # Send once immediately, then refresh until told to stop.
+        # Keep refreshing until told to stop (Telegram expires actions ~5s).
         while not stop.is_set():
-            await send_action(bot, chat_id, action,
-                              message_thread_id=message_thread_id)
             try:
                 await asyncio.wait_for(stop.wait(), timeout=interval)
             except asyncio.TimeoutError:
-                continue
+                await send_action(bot, chat_id, action,
+                                  message_thread_id=message_thread_id)
+            else:
+                break
 
     task = asyncio.create_task(_pump())
     try:

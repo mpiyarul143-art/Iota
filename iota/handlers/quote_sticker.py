@@ -56,6 +56,25 @@ class QuotlyError(Exception):
     """Raised when no quote endpoint could produce an image."""
 
 
+def _looks_like_image(b: bytes) -> bool:
+    """True if `b` starts with the magic bytes of a format Telegram accepts
+    (WEBP / PNG / JPEG / GIF). The quote endpoints occasionally answer HTTP
+    200 with an HTML or JSON *error* page; sending those bytes to
+    reply_sticker/reply_photo makes Telegram reject the file. Validating up
+    front lets us fall through to the next endpoint instead of crashing."""
+    if not b or len(b) < 12:
+        return False
+    if b[:4] == b"RIFF" and b[8:12] == b"WEBP":   # WEBP
+        return True
+    if b[:8] == b"\x89PNG\r\n\x1a\n":              # PNG
+        return True
+    if b[:3] == b"\xff\xd8\xff":                   # JPEG
+        return True
+    if b[:6] in (b"GIF87a", b"GIF89a"):            # GIF
+        return True
+    return False
+
+
 # ── Telegram-message → quotly field extractors ────────────────────────────
 
 def _sender_id(m) -> int:
@@ -214,14 +233,24 @@ async def _render_quote(context, messages, include_reply: bool,
                             last_err = f"no image field from {url}"
                             continue
                         try:
-                            return base64.b64decode(img_b64)
+                            raw = base64.b64decode(img_b64)
                         except Exception:
                             last_err = f"bad base64 from {url}"
                             continue
-                    # Otherwise treat the body as a raw image.
-                    if body:
+                        if not _looks_like_image(raw):
+                            last_err = f"decoded bytes not an image from {url}"
+                            continue
+                        return raw
+                    # Otherwise treat the body as a raw image — but only if it
+                    # actually looks like one (some endpoints return an HTML /
+                    # JSON error page with HTTP 200).
+                    if _looks_like_image(body):
                         return body
-                    last_err = f"empty body from {url}"
+                    last_err = (
+                        f"non-image body from {url} "
+                        f"(status 200, {len(body)} bytes, "
+                        f"starts {body[:16]!r})"
+                    )
             except Exception as e:
                 last_err = f"{type(e).__name__}: {e} ({url})"
     raise QuotlyError(last_err)
@@ -303,28 +332,84 @@ async def quote_sticker_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                message_thread_id=thread_id):
             img = await _render_quote(context, [reply], include_reply,
                                       background or _BACKGROUND)
-        bio = BytesIO(img)
-        bio.name = "quote.webp"
-        # Anchor the sticker as a reply to the /q command, and never fail if
-        # the original message was deleted meanwhile.
-        await msg.reply_sticker(
-            bio, emoji=_QUOTE_EMOJI,
-            reply_to_message_id=msg.message_id,
-            allow_sending_without_reply=True,
-        )
     except QuotlyError as e:
         logger.warning(f"/q failed (all endpoints): {e}")
         await _safe_reply(msg, "❌ Abhi quote nahi ban paaya, thodi der baad try karo 🥺")
+        return
     except Exception as e:
-        # Distinguish common Telegram permission errors for a clearer message.
+        logger.exception(f"/q render error: {e}")
+        await _safe_reply(msg, "❌ Abhi quote nahi ban paaya, thodi der baad try karo 🥺")
+        return
+
+    # ── Deliver the quote. Telegram is picky about what counts as a valid
+    # sticker webp, so if reply_sticker is rejected we transparently fall
+    # back to sending the SAME image as a photo, then as a document. The
+    # user always gets their quote — /q never dead-ends on "Kuch gadbad". ──
+    sent = await _send_quote(msg, img)
+    if not sent:
+        await _safe_reply(
+            msg,
+            "❌ Quote ban gaya par yahan bhej nahi paayi — "
+            "shayad mujhe media bhejne ki permission nahi hai 🥺",
+        )
+
+
+def _fresh_bio(img: bytes, name: str) -> BytesIO:
+    """A brand-new BytesIO per send attempt (a consumed stream can't be
+    re-read, so each fallback needs its own)."""
+    bio = BytesIO(img)
+    bio.name = name
+    return bio
+
+
+async def _send_quote(msg, img: bytes) -> bool:
+    """Try sticker → photo → document. Returns True on the first success.
+    Every attempt is isolated so one Telegram rejection can't abort the rest.
+    Permission errors (Forbidden) short-circuit since retrying won't help."""
+    reply_kwargs = {
+        "reply_to_message_id": msg.message_id,
+        "allow_sending_without_reply": True,
+    }
+
+    # 1) Native sticker (the ideal result).
+    try:
+        await msg.reply_sticker(
+            _fresh_bio(img, "quote.webp"),
+            emoji=_QUOTE_EMOJI,
+            **reply_kwargs,
+        )
+        return True
+    except Exception as e:
         emsg = str(e).lower()
-        if "not enough rights" in emsg or "sticker" in emsg and "forbidden" in emsg:
-            await _safe_reply(msg, "❌ Mujhe yahan sticker bhejne ki permission nahi hai 🥺")
-        elif "chat write forbidden" in emsg or "forbidden" in emsg:
-            await _safe_reply(msg, "❌ Yahan main message nahi bhej sakti 😔")
-        else:
-            logger.exception(f"/q unexpected error: {e}")
-            await _safe_reply(msg, "❌ Kuch gadbad ho gayi quote banate waqt 🤷🏻‍♀️")
+        if "forbidden" in emsg or "not enough rights" in emsg or "chat write" in emsg:
+            logger.warning(f"/q sticker send forbidden: {e}")
+            return False
+        logger.warning(f"/q reply_sticker rejected, falling back to photo: {e}")
+
+    # 2) Photo (Telegram accepts the webp as a photo far more leniently).
+    try:
+        await msg.reply_photo(
+            _fresh_bio(img, "quote.webp"),
+            **reply_kwargs,
+        )
+        return True
+    except Exception as e:
+        emsg = str(e).lower()
+        if "forbidden" in emsg or "not enough rights" in emsg or "chat write" in emsg:
+            logger.warning(f"/q photo send forbidden: {e}")
+            return False
+        logger.warning(f"/q reply_photo rejected, falling back to document: {e}")
+
+    # 3) Document (last resort — near-universally accepted).
+    try:
+        await msg.reply_document(
+            _fresh_bio(img, "quote.webp"),
+            **reply_kwargs,
+        )
+        return True
+    except Exception as e:
+        logger.warning(f"/q reply_document also failed: {e}")
+        return False
 
 
 async def _safe_reply(msg, text: str):
