@@ -5,9 +5,10 @@ Resilient, multi-source search that works even when DuckDuckGo blocks the
 bot's IP (common on datacenter / hosting providers like Render). It tries
 providers in order and falls back automatically:
 
-  1. DuckDuckGo HTML  (primary, no API key)
+  1. DuckDuckGo HTML  (POST, then GET — different DDG edge behaviour)
   2. DuckDuckGo Lite  (lighter HTML endpoint)
-  3. Wikipedia        (factual fallback — extremely reliable, works from
+  3. DuckDuckGo Instant-Answer JSON (different infra, rarely rate-limited)
+  4. Wikipedia        (factual fallback — extremely reliable, works from
                        datacenter IPs as long as we send a real User-Agent)
 
 Every provider is wrapped so a single failure (timeout, block page, parse
@@ -16,17 +17,20 @@ clean `search_summary()` string or "" — never a raw exception — so the
 chat path stays at 0 errors.
 """
 import asyncio
+import itertools
 import logging
-import aiohttp
 import re
 import time as _time
 import urllib.parse
 from html import unescape
 
+import aiohttp
+
 logger = logging.getLogger(__name__)
 
 DDG_HTML_URL = "https://html.duckduckgo.com/html/"
 DDG_LITE_URL = "https://lite.duckduckgo.com/lite/"
+DDG_IA_URL   = "https://api.duckduckgo.com/"
 WIKI_API_URL = "https://en.wikipedia.org/w/api.php"
 
 # A small pool of realistic browser UAs. DDG blocks datacenter/empty UAs
@@ -41,7 +45,6 @@ _USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) "
     "Gecko/20100101 Firefox/125.0",
 ]
-import itertools
 _ua_cycle = itertools.cycle(_USER_AGENTS)
 
 
@@ -57,13 +60,13 @@ _ANOMALY_RE = re.compile(r"unusual traffic|anomaly|are you a robot|bot check",
 _RESULT_RE = re.compile(
     r'<a rel="nofollow" class="result__a" href="([^"]+)"[^>]*>(.*?)</a>.*?'
     r'class="result__snippet"[^>]*>(.*?)</a>',
-    re.S
+    re.S,
 )
 # ── DuckDuckGo Lite result parser ────────────────────────────────────────
 _LITE_RE = re.compile(
     r'class="result-link"[^>]*><a href="([^"]+)"[^>]*>(.*?)</a>'
     r'.*?class="result-snippet"[^>]*>(.*?)</td>',
-    re.S
+    re.S,
 )
 
 
@@ -97,25 +100,38 @@ async def _fetch(session: aiohttp.ClientSession, method: str, url: str,
     headers = kw.pop("headers", {})
     headers.setdefault("User-Agent", _next_ua())
     timeout = aiohttp.ClientTimeout(total=10)
-    if method == "POST":
-        async with session.post(url, headers=headers, timeout=timeout,
-                                **kw) as r:
-            if r.status != 200:
-                return ""
-            return await r.text()
-    else:
-        async with session.get(url, headers=headers, timeout=timeout,
-                               **kw) as r:
-            if r.status != 200:
-                return ""
-            return await r.text()
+    try:
+        if method == "POST":
+            async with session.post(url, headers=headers, timeout=timeout,
+                                    **kw) as r:
+                if r.status != 200:
+                    return ""
+                return await r.text()
+        else:
+            async with session.get(url, headers=headers, timeout=timeout,
+                                   **kw) as r:
+                if r.status != 200:
+                    return ""
+                return await r.text()
+    except Exception:
+        return ""
 
 
 async def _ddg_html(query: str, max_results: int) -> list:
+    """DuckDuckGo HTML endpoint. Tries POST first, then GET — some edge
+    nodes reject one method but serve the other, so trying both makes the
+    primary provider far more reliable."""
+    html = ""
     async with aiohttp.ClientSession() as s:
-        html = await _fetch(s, "POST", DDG_HTML_URL,
-                            data={"q": query, "kl": "us-en"})
-    if not html or _ANOMALY_RE.search(html):
+        for method, kw in (
+            ("POST", {"data": {"q": query, "kl": "us-en"}}),
+            ("GET",  {"params": {"q": query, "kl": "us-en"}}),
+        ):
+            html = await _fetch(s, method, DDG_HTML_URL, **kw)
+            if html and not _ANOMALY_RE.search(html):
+                break
+            html = ""
+    if not html:
         return []
     out = []
     for m in _RESULT_RE.finditer(html):
@@ -131,13 +147,21 @@ async def _ddg_html(query: str, max_results: int) -> list:
 
 
 async def _ddg_lite(query: str, max_results: int) -> list:
+    """DuckDuckGo Lite endpoint. POST first, then GET."""
+    html = ""
     async with aiohttp.ClientSession() as s:
-        html = await _fetch(s, "POST", DDG_LITE_URL,
-                            data={"q": query, "kl": "us-en"},
-                            headers={"Content-Type":
-                                      "application/x-www-form-urlencoded",
-                                      "Origin": "https://lite.duckduckgo.com"})
-    if not html or _ANOMALY_RE.search(html):
+        for method, kw in (
+            ("POST", {"data": {"q": query, "kl": "us-en"},
+                      "headers": {"Content-Type":
+                                  "application/x-www-form-urlencoded",
+                                  "Origin": "https://lite.duckduckgo.com"}}),
+            ("GET",  {"params": {"q": query, "kl": "us-en"}}),
+        ):
+            html = await _fetch(s, method, DDG_LITE_URL, **kw)
+            if html and not _ANOMALY_RE.search(html):
+                break
+            html = ""
+    if not html:
         return []
     out = []
     for m in _LITE_RE.finditer(html):
@@ -150,6 +174,64 @@ async def _ddg_lite(query: str, max_results: int) -> list:
         if len(out) >= max_results:
             break
     return out
+
+
+async def _ddg_instant(query: str, max_results: int) -> list:
+    """DuckDuckGo Instant-Answer JSON API. Served from different
+    infrastructure than the HTML scraper and rarely rate-limited, so it's
+    a great extra fallback. Returns curated abstracts + related topics —
+    perfect grounding facts for the AI. Returns [] on any failure."""
+    params = {"q": query, "format": "json", "no_html": "1",
+              "no_redirect": "1", "skip_disambig": "1"}
+    try:
+        async with aiohttp.ClientSession() as s:
+            txt = await _fetch(s, "GET", DDG_IA_URL, params=params)
+        if not txt:
+            return []
+        data = _safe_json(txt)
+    except Exception as e:
+        logger.debug(f"ddg instant failed: {e}")
+        return []
+    if not data:
+        return []
+    out = []
+    # 1. Primary abstract (best, most factual).
+    abstract = (data.get("AbstractText") or "").strip()
+    if abstract:
+        out.append({
+            "title":   (data.get("Heading") or query).strip(),
+            "url":     data.get("AbstractURL") or "",
+            "snippet": _clean(abstract),
+        })
+    # 2. Direct answer (calculations, conversions, definitions).
+    answer = (data.get("Answer") or "").strip()
+    if answer:
+        out.append({
+            "title":   data.get("AnswerType") or "Answer",
+            "url":     "",
+            "snippet": _clean(answer),
+        })
+    # 3. Related topics (each has Text + FirstURL; some nest under "Topics").
+    for topic in (data.get("RelatedTopics") or []):
+        if len(out) >= max_results:
+            break
+        entries = (topic.get("Topics")
+                   if isinstance(topic, dict) and "Topics" in topic
+                   else [topic])
+        for e in entries:
+            if len(out) >= max_results:
+                break
+            if not isinstance(e, dict):
+                continue
+            text = (e.get("Text") or "").strip()
+            if not text:
+                continue
+            out.append({
+                "title":   text.split(" - ")[0][:80],
+                "url":     e.get("FirstURL") or "",
+                "snippet": _clean(text),
+            })
+    return out[:max_results]
 
 
 async def _wikipedia(query: str, max_results: int) -> list:
@@ -200,8 +282,7 @@ def _safe_json(txt: str):
 # DuckDuckGo rate-limits datacenter IPs, so the SAME query can return results
 # one moment and nothing the next. Caching makes repeated/identical queries
 # return consistent, reliable answers and avoids re-hitting the flaky
-# provider on every single message (which is exactly why "Elon Musk net
-# worth" gave data once, then "can't check", then a wrong training answer).
+# provider on every single message.
 _CACHE: dict = {}
 _CACHE_TTL = 900  # 15 minutes
 
@@ -344,8 +425,9 @@ async def web_search(query: str, max_results: int = 5) -> list:
     Free, RESILIENT web search. Returns list of dicts:
         [{"title", "url", "snippet"}, ...]
     Strategy (ordered, each step never raises):
-      1. Cache hit → return immediately (consistent + avoids rate limits).
-      2. DuckDuckGo HTML → Lite (tolerant parsers) for broad web coverage.
+      1. Cache hit -> return immediately (consistent + avoids rate limits).
+      2. DuckDuckGo HTML (POST+GET) -> Lite (POST+GET) -> Instant-Answer
+         JSON for broad web coverage across multiple endpoint shapes.
       3. Enrich any Wikipedia hits with their REAL lead extract so the AI
          sees grounded facts, not a clipped teaser.
       4. If DDG gave nothing, fall back to Wikipedia search + extracts
@@ -359,12 +441,14 @@ async def web_search(query: str, max_results: int = 5) -> list:
 
     cached = _cache_get(query)
     if cached is not None:
-        logger.debug(f"🔎 search('{query}') -> cache hit ({len(cached)} results)")
+        logger.debug(f"search('{query}') -> cache hit ({len(cached)} results)")
         return cached
 
-    # 1. DuckDuckGo HTML → Lite
+    # 1. DuckDuckGo across multiple endpoint shapes. DDG rate-limits
+    #    datacenter IPs inconsistently, so whichever shape isn't blocked
+    #    right now will answer.
     results = []
-    for provider in (_ddg_html, _ddg_lite):
+    for provider in (_ddg_html, _ddg_lite, _ddg_instant):
         try:
             results = await provider(query, max_results)
         except Exception as e:
@@ -381,28 +465,27 @@ async def web_search(query: str, max_results: int = 5) -> list:
             results = await _enrich_with_wikipedia(results, max_results)
         except Exception as e:
             logger.debug(f"wiki enrich failed (keeping DDG results): {e}")
-        # If DDG returned only non-Wikipedia results (e.g. a Hindi news
-        # snippet for "Elon Musk ki networth kitni hain"), still fetch the
+        # If DDG returned only non-Wikipedia results, still fetch the
         # canonical Wikipedia extract for the cleaned entity and PREPEND it,
-        # so the AI always has a grounded factual anchor (the real number)
-        # rather than just a teaser.
+        # so the AI always has a grounded factual anchor.
         if not any(_is_wikipedia(r.get("url", "")) for r in results):
             try:
                 wiki = await _wikipedia_full(query, max_results)
-                # 🔴 Relevance guard: only prepend Wikipedia hits whose title
+                # Relevance guard: only prepend Wikipedia hits whose title
                 # actually contains an entity from the user's query. This
-                # stops a bad Wikipedia search (e.g. "Elon Musk networth"
-                # -> "Zip2") from injecting a WRONG fact into the AI context.
+                # stops a bad Wikipedia search from injecting a WRONG fact.
                 ents = _query_entities(query)
                 if wiki and ents:
                     wiki = [w for w in wiki
-                            if ents & {t.lower() for t in re.findall(r"[A-Za-z]+", w["title"])}]
+                            if ents & {t.lower()
+                                       for t in re.findall(r"[A-Za-z]+",
+                                                           w["title"])}]
                 if wiki:
                     results = wiki + results
             except Exception as e:
                 logger.debug(f"wiki prepend failed: {e}")
         _cache_set(query, results)
-        logger.debug(f"🔎 search('{query}') -> {len(results)} results (DDG+wiki)")
+        logger.debug(f"search('{query}') -> {len(results)} results (DDG+wiki)")
         return results
 
     # 3. Wikipedia-only fallback (reliable from datacenter IPs)
@@ -410,12 +493,12 @@ async def web_search(query: str, max_results: int = 5) -> list:
         wiki = await _wikipedia_full(query, max_results)
         if wiki:
             _cache_set(query, wiki)
-            logger.debug(f"🔎 search('{query}') -> {len(wiki)} results (wikipedia)")
+            logger.debug(f"search('{query}') -> {len(wiki)} results (wikipedia)")
             return wiki
     except Exception as e:
         logger.debug(f"wikipedia fallback failed: {e}")
 
-    logger.debug(f"🔎 search('{query}') -> no results from any provider")
+    logger.debug(f"search('{query}') -> no results from any provider")
     return []
 
 
@@ -424,7 +507,7 @@ async def search_summary(query: str, max_results: int = 4) -> str:
     Returns a compact text block of search results, ready to inject
     into an AI context prompt for grounded, up-to-date answers.
     Returns "" when no provider could find anything (so the AI falls back
-    to its own graceful 'can't check right now' line).
+    to its own graceful reply).
     """
     results = await web_search(query, max_results)
     if not results:

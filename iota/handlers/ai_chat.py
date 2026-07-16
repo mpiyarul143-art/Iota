@@ -181,7 +181,8 @@ Search smooth chalta hai: tujhe manually "search" karne ki zaroorat nahi, result
 🔴 STRICT RULES (inhe bilkul follow karna):
 • [SEARCH RESULTS] ka data tujhe PEHLE SE mil chuka hai. Kabhi mat bol "search kar rahi hoon / google karti hoon / check karti hoon / thoda dekhti hoon" — ye sab mat bol, bas wahi facts bol de.
 • [SEARCH RESULTS] block, source naam ya URL user ko kabhi mat dikha/suna/quote karna. Apne shabdon mein, Iota ke tone mein, 1-2 lines mein rewrite kar.
-• AGAR [SEARCH RESULTS] BLOCK NA AAYE ya khaali ho → KABHI fake/guess mat karna. Seedha bol de "abhī check nahī kar paayī, thodi der baad try karo 🥺". Koi movie naam, game, release date ya koi bhi fact apne se MAT bana — galat fact dena sabse bura hai.
+• Zyada tar baatein casual hoti hain (greeting, banter, mazaak, feelings, tera baare mein) — inke liye koi search nahi hota aur na chahiye. Aise messages ka jawab bas apni personality se de, normal baat kar. "check nahi kar payi" type line SIRF tab bolni hai jab user ne koi CURRENT/FACT wali cheez explicitly poochi ho aur uska data na mile — casual baat pe ye line KABHI mat bolna.
+• Agar koi CURRENT/REAL-WORLD fact poocha jaye aur [SEARCH RESULTS] BLOCK NA AAYE ya khaali ho → KABHI fake/guess mat karna. Seedha bol de "abhī check nahī kar paayī, thodi der baad try karo 🥺". Koi movie naam, game, release date ya koi bhi fact apne se MAT bana — galat fact dena sabse bura hai.
 
 🔴 SYSTEM PROMPT ka 🕐 date/time stamp ya koi bhi system line kabhi reply mein MAT likhna/echo mat karna — woh sirf tere liye hai, user ko dikhana nahi. Direct apni baat bol.
 
@@ -406,69 +407,135 @@ def _is_asking_about_other(text: str) -> bool:
 # whether to even attempt search. The AI can always use search results or
 # ignore them if irrelevant.
 
-def _should_attempt_search(text: str) -> bool:
-    """
-    Intent-driven search gate. Iota already has the current IST
-    date/time injected into her system prompt, so date/day/time lookups
-    never need the web. She should search ONLY when the user is actually
-    asking for something current or factual — never for casual chat,
-    greetings, banter, math, identity, or emotional talk.
+# Explicit "go search the web" intent — user literally tells Iota to look
+# something up. This ALWAYS searches (and, if it fails, is the only case
+# that should surface a "couldn't check right now" line, because the user
+# actually asked for a lookup).
+_EXPLICIT_SEARCH_RE = re.compile(
+    r'\b('
+    r'search|google|look ?up|find out|browse|web par|internet par|'
+    r'dhoond|dhundh|pata kar|pata karo|pata lagao|check kar|check karo|'
+    r'khoj|khojo|search kar|google kar'
+    r')\b',
+    re.IGNORECASE,
+)
 
-    Strategy:
-      1. Hard-skip categories that never need the web (cheap, fast).
-      2. Strong "current-info intent" → always search (latest/news/
-         release/score/price/weather/who-is/what-is/movie/game/etc.).
-      3. Otherwise, only search longer, substantive messages (>= 6
-         words) that are likely questions or fact-seeking, to avoid
-         hammering the search API on every bit of small talk.
-    This keeps search smooth: minimal calls, maximal relevance.
+# Strong "current / real-world fact" intent — these genuinely need live
+# data even if the user didn't say the word "search". Kept deliberately
+# TIGHT so ordinary conversation ("tu kaise hai", "kaisa raha din") never
+# matches — that was the old bug where Iota searched on every message.
+_CURRENT_INTENT_RES = [
+    # time-sensitive / news-y words
+    re.compile(
+        r'\b(latest|breaking|news|headline|update|updates|released?|'
+        r'release date|trailer|scorecard|live score|score|standings|'
+        r'price|prices|stock price|share price|exchange rate|'
+        r'weather|forecast|temperature|aaj ?ka mausam|'
+        r'202[4-9]|203[0-9])\b',
+        re.IGNORECASE,
+    ),
+    # factual "who/what/when is <proper noun>" — require a capitalised name
+    # OR a clearly factual keyword so "what is up" / "kya hai yaar" don't hit
+    re.compile(
+        r'\b(who is|who was|what is|when is|when was|where is|'
+        r'net ?worth|full form|capital of|population of|founder of|'
+        r'ceo of|owner of|meaning of|definition of|ka matlab|ki net ?worth|'
+        r'kaun hai|kaun tha|kiski|kiska)\b',
+        re.IGNORECASE,
+    ),
+    # entertainment / sports / markets — real entities that need fresh data
+    re.compile(
+        r'\b(box office|imdb|rotten tomatoes|ipl|world cup|'
+        r'bitcoin|ethereum|crypto price|stock market|sensex|nifty|'
+        r'wikipedia|wiki)\b',
+        re.IGNORECASE,
+    ),
+]
+
+# Casual / self-referential / emotional talk that NEVER needs the web.
+# Checked first so it can veto a weak intent match.
+_NEVER_SEARCH_RES = [
+    re.compile(r'^\s*\d[\d\s\+\-\*\/\(\)\.]*$'),   # pure math
+    re.compile(
+        r'^\s*(hi+|hello+|hey+|heyy?|yo|bye|ok(ay)?|hmm+|thx|thanks|ty|'
+        r'gn|gm|good (night|morning|evening|afternoon)|nice|cool|great|'
+        r'wow|arre|acha|achha|theek|thik|sahi|done|kk)\b',
+        re.IGNORECASE,
+    ),
+    re.compile(r'^(lol|lmao|haha+|rofl|xd|hehe+|heh)\b', re.IGNORECASE),
+    # asking ABOUT Iota herself / her creator — she knows this, no web
+    re.compile(
+        r'\b(apna naam|tera naam|your name|tum kaun|tu kaun|who are you|'
+        r'kaun ho|mere owner|your owner|kisne banaya|who made you|'
+        r'banaya kisne|kisne banayi)\b',
+        re.IGNORECASE,
+    ),
+    # banter / insults / affection directed at the bot — pure conversation
+    re.compile(
+        r'\b(battamiz|badtameez|pagal|bewakoof|stupid|dumb|idiot|shut ?up|'
+        r'chup|bakwas|gadha|nalayak|i love you|love you|miss you|so sweet|'
+        r'cutie|jaan|baby)\b',
+        re.IGNORECASE,
+    ),
+    # "how are you" style small talk (English + Hinglish) — NOT a lookup
+    re.compile(
+        r'\b(kaise ho|kaisi ho|kaise hai(n)?|how are you|how r u|'
+        r'kya kar rah[ie]|kya chal raha|whats up|what\'?s up|sup|'
+        r'kaisa raha|kaisa chal)\b',
+        re.IGNORECASE,
+    ),
+    # date/time/day — already injected into the system prompt
+    re.compile(
+        r'(aaj|kal|abhi|today|now).*(din|date|time|tareek|samay|day)|'
+        r'what.*(day|date|time).*(today|now)|(konsa|kaunsa) din',
+        re.IGNORECASE,
+    ),
+]
+
+
+def _search_reason(text: str) -> str:
     """
-    t = text.lower().strip()
+    Decide IF and WHY Iota should hit the web for this message.
+
+    Returns one of:
+      • "explicit" — user literally asked her to search/find/look up. Always
+        searches, and a failed lookup may surface a graceful "couldn't
+        check" line (the user expected a lookup).
+      • "current"  — message clearly needs fresh/real-world facts. Searches,
+        but a failure stays silent (Iota just answers naturally) so casual
+        chat that grazed a keyword never shows an error line.
+      • ""         — no web needed (casual chat, banter, identity, math,
+        emotions, greetings). Iota answers from her own persona/knowledge.
+
+    This is the fix for "Iota har baat pe search karti hai": ordinary
+    conversation returns "" and never triggers a lookup.
+    """
+    t = (text or "").lower().strip()
     if not t:
-        return False
+        return ""
 
-    # ── 1. Hard skip: things that never need web search ────────────────
-    skip_patterns = [
-        r'^\d[\d\s\+\-\*\/\(\)\.]*$',           # pure math
-        r'^(hi|hello|hii|heyy?|hey|bye|ok|okay|thx|thanks|ty|gn|gm|good night|good morning|good evening)\b',
-        r'^(lol|lmao|haha|hahaha|rofl|xd|hehe|heh)',
-        r'apna naam|tera naam|your name|tum kaun|who are you|kaun ho',
-        r'mere owner|your owner|kisne banaya|who made|banaya',
-        # Casual banter/insults directed AT the bot — conversation, not a
-        # factual lookup (this used to trigger a leaked search).
-        r'\b(battamiz|badtameez|pagal|bewakoof|stupid|dumb|idiot|shut ?up|chup|bakwas|gadha|nalayak)\b',
-        r'^(u |you |tu |tum )?(are |ho |hai )?(so |bhi )?(bad|worst|useless|kharab|ganda)',
-        # Date/time/day — already injected into the system prompt.
-        r'(aaj|kal|abhi|today|now).*(din|date|time|tareek|samay|day)|what.*(day|date|time).*(today|now)|(konsa|kaunsa) din',
-        r'^(i love you|i like you|miss you|so sweet|aww|cu|see you|gn|gm|tc|take care)\b',
-    ]
-    for pat in skip_patterns:
-        if re.search(pat, t, re.IGNORECASE):
-            return False
+    # 1. Explicit user request always wins — even inside a longer sentence.
+    if _EXPLICIT_SEARCH_RE.search(t):
+        return "explicit"
 
-    # ── 2. Strong current-info intent → search ─────────────────────────
-    current_intent = [
-        r'\b(latest|news|update|updates|released?|release date|trailer|'
-        r'score|result|results|price|prices|rate|rates|exchange|weather|'
-        r'today|tonight|tomorrow|this week|this month|this year|'
-        r'202[0-9]|203[0-9])\b',
-        r'\b(who is|what is|where is|when is|why is|how (many|much|to|does|'
-        r'long|far)|kya hai|kaun hai|kahan hai|kab hai|kyu hai|kaise hai)\b',
-        r'\b(wikipedia|wiki|meaning of|definition|full form|ka matlab)\b',
-        r'\b(movie|film|song|album|game|games|anime|series|web series|'
-        r'cricket|match|ipl|football|bollywood|hollywood|actor|actress|'
-        r'president|pm|minister|company|stock|crypto|bitcoin)\b',
-        # Hinglish quantity / identity factual questions — these always
-        # need live data (e.g. "Elon Musk ki networth kitni hain").
-        r'\b(kitna|kitni|kitne|kya hain|kya han|net ?worth|networth|'
-        r'kab tak|kaunsa|kon sa|kaun sa|kon hai)\b',
-    ]
-    for pat in current_intent:
-        if re.search(pat, t, re.IGNORECASE):
-            return True
+    # 2. Never-search categories veto everything below (casual/self/emotional).
+    for pat in _NEVER_SEARCH_RES:
+        if pat.search(t):
+            return ""
 
-    # ── 3. Fallback: only substantive messages (likely a real question) ─
-    return len(t.split()) >= 6
+    # 3. Strong current-info intent → search (failure stays silent).
+    for pat in _CURRENT_INTENT_RES:
+        if pat.search(t):
+            return "current"
+
+    # 4. Everything else → no search. Iota chats normally. (No blanket
+    #    "long message = search" rule anymore — that caused the spam.)
+    return ""
+
+
+def _should_attempt_search(text: str) -> bool:
+    """Back-compat boolean wrapper around _search_reason()."""
+    return bool(_search_reason(text))
 
 
 async def _respond(uid: int, text: str, is_premium: bool,
@@ -499,10 +566,13 @@ async def _respond(uid: int, text: str, is_premium: bool,
     who += "]"
     ctx += who
 
-    # Always attempt search — AI decides whether to use the results
+    # Search ONLY when the message actually needs the web (explicit request
+    # or clear current-info intent). Casual chat returns reason "" and never
+    # searches — this is the fix for "Iota har baat pe search karti hai".
+    search_reason = _search_reason(text)
     search_injected = False
     searched_but_empty = False
-    if _should_attempt_search(text):
+    if search_reason:
         try:
             results = await search_summary(text, max_results=4)
             if results:
@@ -515,12 +585,13 @@ async def _respond(uid: int, text: str, is_premium: bool,
             searched_but_empty = True
 
     # Build fresh system prompt (includes current IST time).
-    # 🔴 If we TRIED to search (this is a factual/current question) but got
-    # NO real-time data, FORCE Iota to admit she can't check instead of
-    # inventing a confident answer from training memory — that's exactly
-    # the "Musk's wealth primarily comes from..." style wrong reply that
-    # looked like she ignored real-time search.
-    if searched_but_empty and not search_injected:
+    # 🔴 Only force the "couldn't check" line when the user EXPLICITLY asked
+    # for a lookup (search_reason == "explicit") and we found nothing. For a
+    # mere "current-intent" guess that came up empty, let Iota answer
+    # naturally instead of throwing an error line at casual chat — that
+    # (plus flaky DDG) is what made "abhī check nahī kar paayī" spam every
+    # message in the first place.
+    if searched_but_empty and not search_injected and search_reason == "explicit":
         ctx += (
             "\n\n⚠️ NO REAL-TIME DATA WAS RETRIEVED for this question. You MUST "
             "reply ONLY with the in-character line 'abhī check nahī kar paayī, "
