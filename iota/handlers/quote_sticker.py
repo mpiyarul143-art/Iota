@@ -29,7 +29,7 @@ import re
 from io import BytesIO
 
 import aiohttp
-from telegram import Update
+from telegram import Update, ReplyParameters
 from telegram.ext import ContextTypes
 
 logger = logging.getLogger(__name__)
@@ -266,8 +266,10 @@ async def _send_quote(msg, img: bytes) -> None:
         the quote. Photos are far more lenient to upload under Bot API.
     """
     reply_kwargs = {
-        "reply_to_message_id": msg.message_id,
-        "allow_sending_without_reply": True,
+        "reply_parameters": ReplyParameters(
+            message_id=msg.message_id,
+            allow_sending_without_reply=True,
+        ),
     }
     sticker_bytes = _to_webp(img) if not _is_webp(img) else img
     # 1) Sticker (IotaXMusic look).
